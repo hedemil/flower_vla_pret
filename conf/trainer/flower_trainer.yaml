@@ -1,0 +1,47 @@
+_target_: flower_vla.trainers.flower_trainer.AccelerateTrainer
+_recursive_: false
+
+defaults:
+  - agent: flower_vla
+
+use_torch_compile: False
+single_optimizer: False
+learning_rate_dit: 1e-4
+learning_rate_vlm: 2e-5
+use_lr_scheduler: True
+beta_dit_1: 0.9
+beta_dit_2: 0.95
+beta_vlm_1: 0.9
+beta_vlm_2: 0.99
+weight_decay:
+  transformer_weight_decay: 0.1
+  vlm_weight_decay: 1e-9
+
+dit_lr_scheduler: 
+  _target_: flower_vla.utils.lr_schedulers.InverseSquareRootLRSchedule
+  num_warmup_steps: 1000
+  timescale: 400000
+
+vlm_lr_scheduler: 
+  _target_: flower_vla.utils.lr_schedulers.TriStageLRScheduler
+  init_lr_scale: 0.001
+  final_lr_scale: 0.5
+  phase_ratio: "(0.1, 0.89, 0.01)"
+  total_steps: 400000
+
+eval_every_n_steps: ${eval_every_n_steps}
+save_every_n_steps: ${save_every_n_steps} 
+max_train_steps: ${max_train_steps}
+max_eval_steps: ${max_eval_steps}
+
+use_ema: False
+decay: ${decay}
+rampup_ratio: ${rampup_ratio}
+update_ema_every_n_steps: ${update_ema_every_n_steps}
+batch_size: ${batch_size}
+
+obs_modalities: ${obs_modalities}
+goal_modalities: ${goal_modalities}
+img_modalities: ${img_modalities} 
+lang_modalities: ${lang_modalities}
+target_modality: ${target_modality}

@@ -1,0 +1,3 @@
+[submodule "SimplerEnv"]
+	path = SimplerEnv
+	url = git@github.com:Toradus/SimplerEnv.git
