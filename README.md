@@ -1,6 +1,6 @@
 # FlowerVLA
 
-[Paper](), [Project Page](), 
+[Paper](https://www.arxiv.org/pdf/2509.04996), [Project Page](https://intuitive-robots.github.io/flower_vla/), [Finetuning Code](https://github.com/intuitive-robots/flower_vla_calvin)
 
 [Moritz Reuss](https://mbreuss.github.io/)<sup>1</sup>,
 [Hongyi Zhou](https://hongyizhoucn.github.io/)<sup>1</sup>,
@@ -232,12 +232,12 @@ If you found the code useful, please cite our work:
 
 ```bibtex
 @inproceedings{
-reuss2025flower,
-title={{FLOWER}: Democratizing Generalist Robot Policies with Efficient Vision-Language-Flow Models},
-author={Moritz Reuss and Hongyi Zhou and Marcel R{\"u}hle and {\"O}mer Erdin{\c{c}} Ya{\u{g}}murlu and Fabian Otto and Rudolf Lioutikov},
-booktitle={9th Annual Conference on Robot Learning},
-year={2025},
-url={https://openreview.net/forum?id=JeppaebLRD}
+  reuss2025flower,
+  title={{FLOWER}: Democratizing Generalist Robot Policies with Efficient Vision-Language-Flow Models},
+  author={Moritz Reuss and Hongyi Zhou and Marcel R{\"u}hle and {\"O}mer Erdin{\c{c}} Ya{\u{g}}murlu and Fabian Otto and Rudolf Lioutikov},
+  booktitle={9th Annual Conference on Robot Learning},
+  year={2025},
+  url={https://openreview.net/forum?id=JeppaebLRD}
 }
 ```
 
