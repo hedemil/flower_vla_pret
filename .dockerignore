@@ -1,0 +1,15 @@
+.git
+__pycache__
+*.pyc
+*.egg-info
+results/
+results_debug/
+wandb/
+logs/
+outputs/
+*.mp4
+*.safetensors
+*.pt
+.venv
+venv/
+checkpoints/
