@@ -3,6 +3,8 @@ import functools
 import os
 from typing import Optional, Sequence
 from collections import deque
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
@@ -81,7 +83,7 @@ class UhaInference:
         self.use_dopri5 = use_dopri5
         # ------------------------- #
         model_path_split = saved_model_path.split("/")
-        weights_path = saved_model_base_dir + model_path_split[0]
+        weights_path = os.path.join(saved_model_base_dir, model_path_split[0])
         checkpoint_path = os.path.join(weights_path, model_path_split[1])
         file_path = os.path.dirname(os.path.abspath(__file__))
         weights_path_relative = os.path.relpath(weights_path, file_path)
@@ -100,11 +102,16 @@ class UhaInference:
         accelerator = Accelerator()
         agent = accelerator.prepare(agent)
 
+        # Load weights onto the UNWRAPPED model so state dict keys match the checkpoint
+        # (checkpoint saved via accelerator.unwrap_model, keys like "agent.vlm.xxx",
+        #  but wrapped model expects "module.agent.vlm.xxx")
+        unwrapped = accelerator.unwrap_model(agent)
+
         # Load the regular model weights
         safetensors_path = os.path.join(checkpoint_path, "model.safetensors")
         if os.path.exists(safetensors_path):
             print(f"Loading model from {safetensors_path}")
-            missing, unexpected = load_model(agent, safetensors_path)
+            missing, unexpected = load_model(unwrapped, safetensors_path)
             print(f"Missing keys: {len(missing)}")
             print(f"Unexpected keys: {len(unexpected)}")
         else:
@@ -114,7 +121,9 @@ class UhaInference:
                 pt_path = os.path.join(checkpoint_path, pt_files[0])
                 print(f"Loading model from {pt_path}")
                 state_dict = torch.load(pt_path, map_location=device)
-                agent.load_state_dict(state_dict, strict=False)
+                missing, unexpected = unwrapped.load_state_dict(state_dict, strict=False)
+                print(f"Missing keys: {len(missing)}")
+                print(f"Unexpected keys: {len(unexpected)}")
             else:
                 print("WARNING: No model weights found!")
         
