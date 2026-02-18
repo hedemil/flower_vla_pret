@@ -155,7 +155,7 @@ class FlowerAttention(nn.Module):
         self.proj = nn.Linear(dim, dim, bias=False)
         self.attn_dropout = nn.Dropout(attn_pdrop)
         self.resid_dropout = nn.Dropout(resid_pdrop)
-        self.q_norm = RmsNorm(self.head_dim, eps=1e-6) # For Mean Flow we might have to increase. 
+        self.q_norm = RmsNorm(self.head_dim, eps=1e-6)
         self.k_norm = RmsNorm(self.head_dim, eps=1e-6)
         self.use_rope = use_rope
         if use_rope:
@@ -187,22 +187,32 @@ class FlowerAttention(nn.Module):
         k = self.k_norm(k)
         if self.use_rope:
             q, k = apply_rotary_pos_emb(q, k, self.cos, self.sin)
-        # Build causal mask if needed.
-        if is_causal and custom_attn_mask is None:
-            mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=x.device), diagonal=1)
-            mask = mask.unsqueeze(0).unsqueeze(0)
-        elif custom_attn_mask is not None:
+        # Build attention mask if needed.
+        # Causal masking is handled below in the elif is_causal branch.
+        if custom_attn_mask is not None:
             mask = custom_attn_mask.unsqueeze(1).expand(-1, self.n_heads, -1, -1)
         else:
             mask = None
-        # Use PyTorch's built-in scaled dot-product attention.
-        attn_output = F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=None if mask is None else ~mask,
-            dropout_p=self.attn_dropout.p if self.training else 0.0,
-            scale=self.scale,
-            is_causal=is_causal if custom_attn_mask is None else False
-        )
+        # # Use PyTorch's built-in scaled dot-product attention
+        # attn_output = F.scaled_dot_product_attention(
+        #     q, k, v,
+        #     attn_mask=None if mask is None else ~mask,
+        #     dropout_p=self.attn_dropout.p if self.training else 0.0,
+        #     scale=self.scale,
+        #     is_causal=is_causal if custom_attn_mask is None else False
+        # )
+        # Manual attention for JVP compatibility
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+
+        if mask is not None:
+            attn_weights = attn_weights.masked_fill(~mask, float('-inf'))
+        elif is_causal:
+            causal_mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=q.device), diagonal=1)
+            attn_weights = attn_weights.masked_fill(causal_mask, float('-inf'))
+        
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_weights = self.attn_dropout(attn_weights)
+        attn_output = torch.matmul(attn_weights, v)
         out = attn_output.transpose(1, 2).reshape(B, T, C)
         out = self.resid_dropout(self.proj(out))
         return out
@@ -283,24 +293,38 @@ class FlowerCrossAttention(nn.Module):
         if self.use_rope:
             q, _ = apply_rotary_pos_emb(q, q, self.q_cos, self.q_sin)
             k, _ = apply_rotary_pos_emb(k, k, self.k_cos, self.k_sin)
+        # if custom_attn_mask is not None:
+        #     # First resh ape the mask to match q's sequence length
+        #     mask = custom_attn_mask.unsqueeze(1).unsqueeze(2)  # [32, 1, 1, 101]
+        #     mask = mask.expand(-1, self.n_heads, q.size(2), -1)  # [32, 16, 10, 101]
+        #     attn_output = F.scaled_dot_product_attention(
+        #         q, k, v,
+        #         attn_mask=mask,
+        #         dropout_p=self.attn_dropout.p if self.training else 0.0,
+        #         scale=self.scale,
+        #         is_causal=False
+        #     )
+        # else:
+        #     attn_output = F.scaled_dot_product_attention(
+        #         q, k, v,
+        #         dropout_p=self.attn_dropout.p if self.training else 0.0,
+        #         scale=self.scale,
+        #         is_causal=False
+        #     )
+
+        # Manual attention for JVP compatibility
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+
         if custom_attn_mask is not None:
-            # First resh ape the mask to match q's sequence length
-            mask = custom_attn_mask.unsqueeze(1).unsqueeze(2)  # [32, 1, 1, 101]
-            mask = mask.expand(-1, self.n_heads, q.size(2), -1)  # [32, 16, 10, 101]
-            attn_output = F.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=mask,
-                dropout_p=self.attn_dropout.p if self.training else 0.0,
-                scale=self.scale,
-                is_causal=False
-            )
-        else:
-            attn_output = F.scaled_dot_product_attention(
-                q, k, v,
-                dropout_p=self.attn_dropout.p if self.training else 0.0,
-                scale=self.scale,
-                is_causal=False
-            )
+            # Reshape the mask to match the attention weights shape
+            mask = custom_attn_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, S]
+            mask = mask.expand(-1, self.n_heads, q.size(2), -1)  # [B, n_heads, T, S]
+            attn_weights = attn_weights.masked_fill(~mask, float('-inf'))
+        
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_weights = self.attn_dropout(attn_weights)
+        attn_output = torch.matmul(attn_weights, v)
+                                 
         out = attn_output.transpose(1, 2).reshape(B, T, C)
         out = self.resid_dropout(self.proj(out))
         return out
@@ -387,7 +411,8 @@ class FlowBlock(nn.Module):
 
         # Compute modulation signals.
         modulation = self.adaLN_modulation(c)
-        signals = modulation.chunk(6, dim=1)
+        signals = modulation.chunk(6, dim=-1)
+
         if self.use_global_adaln and global_adaln is not None:
             mod_signals = [signals[i] + global_adaln[i] for i in range(6)]
         else:
@@ -582,3 +607,45 @@ class ZeroEncoder(nn.Module):
 
     def forward(self, x):
         return torch.zeros((x.shape[0], self.dit_dim), device=self.device)
+    
+
+class MeanFlowDecoder(nn.Module):
+    def __init__(self, dit_dim: int, action_dim: int, hidden_dim: int=None):
+        super().__init__()
+        hidden_dim = hidden_dim or dit_dim * 2
+
+        # Time embedding for h (timestep difference)
+        # Reuse TimestepEmbedder architecture (sinusodal embedding + MLP)
+        self.h_embedder = TimestepEmbedder(hidden_size=dit_dim)
+
+        # Decoder MLP
+        self.decoder = nn.Sequential(
+            nn.Linear(dit_dim * 2, hidden_dim), # dit_dim (features) + dit_dim (h embedding)
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),  
+            nn.Linear(hidden_dim, action_dim)
+        )
+
+    def forward(self, z: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
+        """
+        Decode the mean action from latent representation z and timestep difference h.
+        
+        Args:
+            z: Latent representation tensor of shape [B, T, dit_dim].
+            h: Timestep difference (t - r) tensor of shape [B] or [B, 1, 1].
+        Returns:
+            Average velocity u [B, T, action_dim].
+        """
+        # Flatten h to [B] for embedding
+        h_flat = h.view(-1)
+
+        # Embed timestep difference
+        h_embed = self.h_embedder(h_flat)  # [B, dit_dim]
+        h_embed = h_embed.unsqueeze(1).expand(-1, z.shape[1], -1)  # [B, T, dit_dim]
+
+        # Concatenate and decode
+        z_h = torch.cat([z, h_embed], dim=-1)  # [B, T, dit_dim * 2]
+
+        return self.decoder(z_h)  # [B, T, action_dim]
+    

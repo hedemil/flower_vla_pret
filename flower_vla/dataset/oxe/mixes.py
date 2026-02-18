@@ -5,6 +5,10 @@ BRIDGE_MIX = [
     ("bridge_dataset", 1.0),
 ]
 
+BRIDGE_ONLY = [
+    ("bridge_dataset", 1.0),
+]
+
 BRIDGE_MARCEL_MIX = [
     ("bridge", 1.0),
 ]
@@ -374,6 +378,7 @@ OXE_NAMED_MIXES = {
     "droid": DROID,
     "trinity": TRINITY,
     "cross_x": CROSS_X_MIX,
+    "bridge_only": BRIDGE_ONLY,
     "action_mixed": ACTION_MIXED,
     'test': TEST,
     "flowereef": FLOWER_EEF_MIX,

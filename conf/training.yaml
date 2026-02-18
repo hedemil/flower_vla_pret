@@ -2,7 +2,7 @@ defaults:
   - datamodule: oxe_data # uha_data
   - trainer: flower_trainer # flower_trainer # baseline_trainer mode_trainer
 
-DATA_NAME: cross_x # cross_x # simpler_env #real_kitchen_droid_co_training
+DATA_NAME: bridge_only # cross_x # simpler_env #real_kitchen_droid_co_training
 
 wandb:
   name: uha_${now:%H-%M-%S}_flower # uha

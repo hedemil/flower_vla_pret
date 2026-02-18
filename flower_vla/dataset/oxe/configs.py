@@ -82,7 +82,7 @@ OXE_DATASET_CONFIGS = {
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.JOINT_POS,
         "proprio_obs_key": "proprio",  # And this here
-        "data_dir": "/home/marcelr/tensorflow_datasets",
+        "data_dir": "/home/emil/tensorflow_datasets",
         "language_key": "language_instruction", # chose "language_instruction*" for all languages texts available,
         # "shuffle": False,
     },
@@ -92,7 +92,7 @@ OXE_DATASET_CONFIGS = {
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.JOINT_POS,
         "proprio_obs_key": "proprio",
-        "data_dir": "/home/marcelr/tensorflow_datasets",
+        "data_dir": "/home/emil/tensorflow_datasets",
         # "shuffle": False,
     },
     "droid": {
@@ -207,7 +207,7 @@ OXE_DATASET_CONFIGS = {
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
         # "data_dir": "~/tensorflow_datasets",
-        "data_dir": "/home/marcelr/tensorflow_datasets",
+        "data_dir": "/home/emil/tensorflow_datasets",
         # "data_dir": "/hkfs/work/workspace/scratch/ft4740-play3",
         # "data_dir": "/hkfs/work/workspace/scratch/unesl-datasets/rail.eecs.berkeley.edu/datasets/bridge_release/data/tfds",
     },
@@ -705,7 +705,7 @@ OXE_DATASET_CONFIGS = {
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
         # "data_dir": "~/tensorflow_datasets/modified_libero_rlds",
-        "data_dir": "/home/marcelr/tensorflow_datasets/modified_libero_rlds",
+        "data_dir": "/home/emil/tensorflow_datasets/modified_libero_rlds",
         "proprio_obs_key": "proprio",
     },
     "libero_object_no_noops": {
@@ -714,7 +714,7 @@ OXE_DATASET_CONFIGS = {
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
         # "data_dir": "~/tensorflow_datasets/modified_libero_rlds",
-        "data_dir": "/home/marcelr/tensorflow_datasets/modified_libero_rlds",
+        "data_dir": "/home/emil/tensorflow_datasets/modified_libero_rlds",
         "proprio_obs_key": "proprio",
     },
     "libero_goal_no_noops": {
@@ -723,7 +723,7 @@ OXE_DATASET_CONFIGS = {
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
         # "data_dir": "~/tensorflow_datasets/modified_libero_rlds",
-        "data_dir": "/home/marcelr/tensorflow_datasets/modified_libero_rlds",
+        "data_dir": "/home/emil/tensorflow_datasets/modified_libero_rlds",
         "proprio_obs_key": "proprio",
     },
     "libero_10_no_noops": {
@@ -732,7 +732,7 @@ OXE_DATASET_CONFIGS = {
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
         # "data_dir": "~/tensorflow_datasets/modified_libero_rlds",
-        "data_dir": "/home/marcelr/tensorflow_datasets/modified_libero_rlds",
+        "data_dir": "/home/emil/tensorflow_datasets/modified_libero_rlds",
         "proprio_obs_key": "proprio",
     },
    #################Calvin Debug#######################
