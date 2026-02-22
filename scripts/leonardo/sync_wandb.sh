@@ -27,7 +27,7 @@ echo "Syncing offline wandb runs from: ${WANDB_DIR}"
 echo ""
 
 # Find and sync all offline runs
-for run_dir in "${WANDB_DIR}"/offline-run-*; do
+for run_dir in "${WANDB_DIR}"/wandb/offline-run-*; do
     if [ -d "${run_dir}" ]; then
         echo "Syncing: $(basename "${run_dir}")"
         wandb sync "${run_dir}"
