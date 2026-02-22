@@ -106,7 +106,7 @@ echo ""
 # --- Launch training ---
 cd "${CODE_DIR}"
 
-accelerate launch --num_processes 4 \
+python -m accelerate.commands.launch --num_processes 4 \
     flower_vla/training.py \
     datamodule.datasets.DATA_PATH="${DATA_DIR}" \
     log_dir="${OUTPUT_DIR}" \
