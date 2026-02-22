@@ -5,18 +5,18 @@
 # Run on a login node (has internet access).
 #
 # Usage:
-#   export LEONARDO_BASE=/leonardo_scratch/fast/<your_account>
+#   export LEONARDO_FAST=/leonardo_scratch/fast/AIFAC_P01_047
 #   bash scripts/leonardo/sync_wandb.sh
 # =============================================================================
 
 set -euo pipefail
 
-if [ -z "${LEONARDO_BASE:-}" ]; then
-    echo "ERROR: LEONARDO_BASE is not set."
+if [ -z "${LEONARDO_FAST:-}" ]; then
+    echo "ERROR: LEONARDO_FAST is not set."
     exit 1
 fi
 
-WANDB_DIR="${LEONARDO_BASE}/project/output/wandb_runs"
+WANDB_DIR="${LEONARDO_FAST}/project/output/wandb_runs"
 
 if [ ! -d "${WANDB_DIR}" ]; then
     echo "ERROR: wandb directory not found: ${WANDB_DIR}"

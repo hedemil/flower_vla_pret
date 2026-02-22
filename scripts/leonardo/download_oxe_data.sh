@@ -10,7 +10,7 @@
 #   - LEONARDO_DATA_DIR set to the target directory
 #
 # Usage:
-#   export LEONARDO_DATA_DIR=/leonardo_scratch/fast/<account>/project/data/tensorflow_datasets
+#   export LEONARDO_DATA_DIR=/leonardo_work/AIFAC_P01_047/project/data/tensorflow_datasets
 #   bash scripts/leonardo/download_oxe_data.sh
 # =============================================================================
 

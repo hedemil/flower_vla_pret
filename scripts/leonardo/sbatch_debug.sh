@@ -1,27 +1,30 @@
 #!/bin/bash
 # =============================================================================
-# SLURM job script for FlowerVLA training on LEONARDO
+# SLURM debug job for FlowerVLA training on LEONARDO
 # =============================================================================
-# Uses native cineca-ai modules + Python venv (no containers).
+# Uses boost_qos_dbg QOS for higher scheduling priority (30 min max).
+# Good for verifying the setup works end-to-end before submitting long jobs.
 #
 # Usage:
 #   export LEONARDO_FAST=/leonardo_scratch/fast/AIFAC_P01_047
 #   export LEONARDO_WORK=/leonardo_work/AIFAC_P01_047
-#   sbatch scripts/leonardo/sbatch_train.sh
+#   sbatch scripts/leonardo/sbatch_debug.sh
 #
-# Paths are split across two storage tiers:
-#   $FAST — code, checkpoints, wandb (I/O-intensive)
-#   $WORK — venv, datasets, HF cache (large, read-heavy)
+# Limits (boost_qos_dbg):
+#   - Max walltime: 30 minutes
+#   - Max nodes: 4
+#   - Max 1 job running and/or pending per user account
 # =============================================================================
 
-#SBATCH --job-name=flowervla
+#SBATCH --job-name=flowervla-dbg
 #SBATCH --partition=boost_usr_prod
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
-#SBATCH --time=24:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
 
@@ -71,7 +74,7 @@ export NCCL_IB_ENABLE=1
 export NCCL_IB_HCA=mlx5
 export NCCL_SOCKET_IFNAME=ib0
 export NCCL_NET_GDR_LEVEL=5
-export NCCL_DEBUG=WARN
+export NCCL_DEBUG=INFO
 
 # --- Distributed training settings ---
 export MASTER_ADDR=$(hostname)
@@ -90,7 +93,7 @@ if [ ! -d "${DATA_DIR}" ]; then
 fi
 
 # --- Diagnostics ---
-echo "=== FlowerVLA Training on LEONARDO ==="
+echo "=== FlowerVLA DEBUG Job on LEONARDO ==="
 echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node: $(hostname)"
 echo "GPUs: ${SLURM_GPUS_ON_NODE:-4}"
@@ -100,10 +103,16 @@ echo "Data: ${DATA_DIR}"
 echo "Output: ${OUTPUT_DIR}"
 echo "Python: $(which python)"
 echo "PyTorch: $(python -c 'import torch; print(torch.__version__)')"
+echo "TensorFlow: $(python -c 'import tensorflow as tf; print(tf.__version__)')"
 echo "CUDA available: $(python -c 'import torch; print(torch.cuda.is_available())')"
+echo "GPU count: $(python -c 'import torch; print(torch.cuda.device_count())')"
 echo ""
 
-# --- Launch training ---
+# List visible GPUs
+nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
+echo ""
+
+# --- Launch training (short run for validation) ---
 cd "${CODE_DIR}"
 
 accelerate launch --num_processes 4 \
@@ -111,4 +120,5 @@ accelerate launch --num_processes 4 \
     datamodule.datasets.DATA_PATH="${DATA_DIR}" \
     log_dir="${OUTPUT_DIR}" \
     wandb.entity=null \
-    wandb.mode=offline
+    wandb.mode=offline \
+    max_train_steps=50
