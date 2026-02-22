@@ -57,24 +57,17 @@ class UhaDataModule:
 
     def _initialize_datasets(self):
         """Initialize datasets with distributed training considerations."""
-        # Only initialize datasets on main process
-        if self.rank == 0:
-            # Modify dataset configuration for distributed training
-            distributed_cfg = copy.deepcopy(self.train_datasets_cfg)
-            
-            # Initialize datasets only on main process
-            print("Creating train dataset")
-            self.train_datasets = uha.get_octo_dataset_tensorflow(
-                distributed_cfg, train=True)
-            print("Train dataset created")
-            
-            print("Creating validation dataset")
-            self.val_datasets = uha.get_octo_dataset_tensorflow(
-                distributed_cfg, train=False)
-            print("Validation dataset created")
-        else:
-            self.train_datasets = None
-            self.val_datasets = None
+        distributed_cfg = copy.deepcopy(self.train_datasets_cfg)
+
+        print(f"Rank {self.rank}: Creating train dataset")
+        self.train_datasets = uha.get_octo_dataset_tensorflow(
+            distributed_cfg, train=True)
+        print(f"Rank {self.rank}: Train dataset created")
+
+        print(f"Rank {self.rank}: Creating validation dataset")
+        self.val_datasets = uha.get_octo_dataset_tensorflow(
+            distributed_cfg, train=False)
+        print(f"Rank {self.rank}: Validation dataset created")
 
     def create_train_dataloader(self, main_process=False):
         """Create distributed-aware train dataloader."""
