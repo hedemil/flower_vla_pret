@@ -2,12 +2,13 @@
 # =============================================================================
 # Download OXE datasets from Google Cloud Storage
 # =============================================================================
-# Run on login node (requires internet access).
-# Downloads only the datasets used in the CROSS_X mix.
+# Run on login node (requires internet access and gsutil in PATH).
+# Downloads only the CROSS_X mix datasets that are available on GCS.
 #
-# Requires:
-#   - gsutil (Google Cloud SDK)
-#   - LEONARDO_DATA_DIR set to the target directory
+# Datasets NOT on GCS (must be transferred manually):
+#   - bridge_dataset  (custom copy from rail.eecs.berkeley.edu)
+#   - kit_irl_real_kitchen_lang  (KIT IRL dataset, not on GCS)
+#   - libero_10_no_noops, libero_goal_no_noops  (LIBERO, transfer from HoreKa)
 #
 # Usage:
 #   export LEONARDO_DATA_DIR=/leonardo_work/AIFAC_P01_047/project/data/tensorflow_datasets
@@ -23,9 +24,8 @@ fi
 
 GCS_BASE="gs://gresearch/robotics"
 
-# Datasets in CROSS_X mix (from mixes.py)
+# CROSS_X mix datasets available on GCS (verified with gsutil ls)
 DATASETS=(
-    "bridge_dataset"
     "fractal20220817_data"
     "dobbe"
     "bc_z"
@@ -33,7 +33,6 @@ DATASETS=(
     "stanford_hydra_dataset_converted_externally_to_rlds"
     "droid"
     "robo_set"
-    "kit_irl_real_kitchen_lang"
 )
 
 echo "Downloading OXE datasets to: ${LEONARDO_DATA_DIR}"
@@ -52,8 +51,17 @@ for ds in "${DATASETS[@]}"; do
 done
 
 echo ""
-echo "All CROSS_X datasets downloaded."
+echo "All GCS datasets downloaded."
 echo ""
-echo "NOTE: LIBERO datasets (libero_10_no_noops, libero_goal_no_noops) are NOT on GCS."
-echo "Transfer them manually from HoreKa:"
-echo "  rsync -avz horeka:<path>/modified_libero_rlds/ ${LEONARDO_DATA_DIR}/modified_libero_rlds/"
+echo "=== Manual transfers still needed ==="
+echo ""
+echo "1. bridge_dataset (custom copy, not the GCS 'bridge'):"
+echo "   Download from https://rail.eecs.berkeley.edu/datasets/bridge_release/data/tfds/"
+echo "   Place in: ${LEONARDO_DATA_DIR}/bridge_dataset/"
+echo ""
+echo "2. kit_irl_real_kitchen_lang (KIT IRL dataset):"
+echo "   Transfer from HoreKa or original source"
+echo "   Place in: ${LEONARDO_DATA_DIR}/kit_irl_real_kitchen_lang/"
+echo ""
+echo "3. LIBERO datasets (libero_10_no_noops, libero_goal_no_noops):"
+echo "   rsync -avz horeka:<path>/modified_libero_rlds/ ${LEONARDO_DATA_DIR}/modified_libero_rlds/"
