@@ -78,7 +78,7 @@ VENV_DIR="${WORK_PROJECT}/venvs/flowervla"
 
 module purge
 module load profile/deeplrn
-module load cineca-ai/3.0.1
+module load cineca-ai/4.3.0
 
 if [ ! -d "${VENV_DIR}" ]; then
     echo "  Creating venv at ${VENV_DIR} (with --system-site-packages)..."

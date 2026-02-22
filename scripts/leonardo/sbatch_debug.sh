@@ -56,7 +56,7 @@ HF_CACHE="${WORK_PROJECT}/data/huggingface_cache"
 # --- Load modules and activate venv ---
 module purge
 module load profile/deeplrn
-module load cineca-ai/3.0.1
+module load cineca-ai/4.3.0
 source "${VENV_DIR}/bin/activate"
 
 # --- Environment variables for offline operation ---
