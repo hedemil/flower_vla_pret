@@ -82,22 +82,27 @@ module load cineca-ai/4.3.0
 
 if [ ! -d "${VENV_DIR}" ]; then
     echo "  Creating venv at ${VENV_DIR}..."
-    # Get cineca-ai's site-packages path before creating the venv
+    # Get cineca-ai's site-packages path BEFORE creating the venv
     CINECA_SITE=$(python -c "import site; print(site.getsitepackages()[0])")
-    # Create a clean venv (no --system-site-packages)
+    # Clean venv — pip has full control, no permission issues
     python -m venv "${VENV_DIR}"
-    # Add cineca-ai packages (torch, tf, numpy, CUDA) as a low-priority fallback.
-    # The .pth file makes Python see them, but pip won't try to uninstall them.
-    echo "${CINECA_SITE}" > "${VENV_DIR}/lib/python3.11/site-packages/cineca-ai.pth"
-    echo "  Venv created. Linked cineca-ai: ${CINECA_SITE}"
+    echo "  Venv created."
 else
     echo "  Venv already exists at ${VENV_DIR}."
+    CINECA_SITE=$(python -c "import site; print(site.getsitepackages()[0])")
 fi
 
 echo "  Activating venv and installing requirements..."
 source "${VENV_DIR}/bin/activate"
 cd "${CODE_DIR}"
-pip install -r requirements_leonardo.txt
+# --no-deps: install only our listed packages, never pull in torch/tf from PyPI
+pip install --no-deps -r requirements_leonardo.txt
+echo "  pip install done."
+
+# NOW add system packages for runtime (torch, tf, numpy, CUDA bindings).
+# .pth entries load AFTER venv site-packages, so our versions take priority.
+echo "${CINECA_SITE}" > "${VENV_DIR}/lib/python3.11/site-packages/cineca-ai.pth"
+echo "  Linked cineca-ai site-packages: ${CINECA_SITE}"
 echo "  Done."
 
 # --- 4. Download OXE datasets ---
