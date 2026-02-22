@@ -57,6 +57,7 @@ module load cuda/12.1
 source "${VENV_DIR}/bin/activate"
 
 # --- Environment variables for offline operation ---
+export HYDRA_FULL_ERROR=1
 export WANDB_MODE=offline
 export WANDB_DIR="${WANDB_DIR}"
 export TRANSFORMERS_OFFLINE=1
