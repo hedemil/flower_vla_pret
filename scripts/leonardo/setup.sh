@@ -81,9 +81,15 @@ module load profile/deeplrn
 module load cineca-ai/4.3.0
 
 if [ ! -d "${VENV_DIR}" ]; then
-    echo "  Creating venv at ${VENV_DIR} (with --system-site-packages)..."
-    python -m venv "${VENV_DIR}" --system-site-packages
-    echo "  Venv created."
+    echo "  Creating venv at ${VENV_DIR}..."
+    # Get cineca-ai's site-packages path before creating the venv
+    CINECA_SITE=$(python -c "import site; print(site.getsitepackages()[0])")
+    # Create a clean venv (no --system-site-packages)
+    python -m venv "${VENV_DIR}"
+    # Add cineca-ai packages (torch, tf, numpy, CUDA) as a low-priority fallback.
+    # The .pth file makes Python see them, but pip won't try to uninstall them.
+    echo "${CINECA_SITE}" > "${VENV_DIR}/lib/python3.11/site-packages/cineca-ai.pth"
+    echo "  Venv created. Linked cineca-ai: ${CINECA_SITE}"
 else
     echo "  Venv already exists at ${VENV_DIR}."
 fi
