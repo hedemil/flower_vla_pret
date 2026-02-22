@@ -4,8 +4,8 @@
 # =============================================================================
 # Run this on the LEONARDO login node to prepare everything for training.
 #
-# Uses native cineca-ai modules + Python venv instead of containers,
-# following CINECA best practices for A100 GPU workloads.
+# Installs all dependencies from pip (no cineca-ai module).
+# Only loads cuda module for GPU/NCCL support.
 #
 # Storage layout:
 #   $FAST (1 TB) — code, checkpoints, wandb runs
@@ -71,38 +71,30 @@ else
     echo "  Found code repository."
 fi
 
-# --- 3. Create Python venv with cineca-ai ---
+# --- 3. Create Python venv ---
 echo ""
 echo "[3/5] Creating Python virtual environment..."
 VENV_DIR="${WORK_PROJECT}/venvs/flowervla"
 
 module purge
 module load profile/deeplrn
-module load cineca-ai/4.3.0
+module load python/3.11.7
+module load cuda/12.1
 
 if [ ! -d "${VENV_DIR}" ]; then
     echo "  Creating venv at ${VENV_DIR}..."
-    # Get cineca-ai's site-packages path BEFORE creating the venv
-    CINECA_SITE=$(python -c "import site; print(site.getsitepackages()[0])")
-    # Clean venv — pip has full control, no permission issues
-    python -m venv "${VENV_DIR}"
+    python3 -m venv "${VENV_DIR}"
     echo "  Venv created."
 else
     echo "  Venv already exists at ${VENV_DIR}."
-    CINECA_SITE=$(python -c "import site; print(site.getsitepackages()[0])")
 fi
 
 echo "  Activating venv and installing requirements..."
 source "${VENV_DIR}/bin/activate"
 cd "${CODE_DIR}"
-# --no-deps: install only our listed packages, never pull in torch/tf from PyPI
-pip install --no-deps -r requirements_leonardo.txt
+pip install --upgrade pip
+pip install -r requirements_leonardo.txt
 echo "  pip install done."
-
-# NOW add system packages for runtime (torch, tf, numpy, CUDA bindings).
-# .pth entries load AFTER venv site-packages, so our versions take priority.
-echo "${CINECA_SITE}" > "${VENV_DIR}/lib/python3.11/site-packages/cineca-ai.pth"
-echo "  Linked cineca-ai site-packages: ${CINECA_SITE}"
 echo "  Done."
 
 # --- 4. Download OXE datasets ---
@@ -124,10 +116,9 @@ echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "Next steps:"
-echo "  1. Verify cineca-ai version: module load profile/deeplrn && module av cineca-ai"
-echo "  2. If LIBERO data is needed, transfer modified_libero_rlds/ from HoreKa:"
+echo "  1. If LIBERO data is needed, transfer modified_libero_rlds/ from HoreKa:"
 echo "       rsync -avz horeka:<path>/modified_libero_rlds/ ${WORK_PROJECT}/data/tensorflow_datasets/modified_libero_rlds/"
-echo "  3. Submit a test job:"
+echo "  2. Submit a test job:"
 echo "       export LEONARDO_FAST=${LEONARDO_FAST}"
 echo "       export LEONARDO_WORK=${LEONARDO_WORK}"
 echo "       sbatch scripts/leonardo/sbatch_train.sh"

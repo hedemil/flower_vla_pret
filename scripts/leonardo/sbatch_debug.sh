@@ -56,14 +56,8 @@ HF_CACHE="${WORK_PROJECT}/data/huggingface_cache"
 # --- Load modules and activate venv ---
 module purge
 module load profile/deeplrn
-module load cineca-ai/4.3.0
+module load cuda/12.1
 source "${VENV_DIR}/bin/activate"
-
-# module load cineca-ai sets PYTHONPATH which puts cineca-ai's packages
-# before venv packages in sys.path. Unset it — the .pth file in the venv
-# provides cineca-ai packages at lower priority than venv packages.
-# LD_LIBRARY_PATH (CUDA/NCCL .so files) is preserved.
-unset PYTHONPATH
 
 # --- Environment variables for offline operation ---
 export WANDB_MODE=offline
