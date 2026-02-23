@@ -11,10 +11,10 @@ ssh ehed0000@login.leonardo.cineca.it
 ```bash
 tmux new -s <sessionname>
 source $LEONARDO_WORK/project/venvs/flowervla/bin/activate
-export LEONARDO_DATA_DIR=$LEONARDO_WORK/project/data/tensorflow_datasets
-export LEONARDO_FAST=/leonardo_scratch/fast/AIFAC_P01_047
-export LEONARDO_WORK=/leonardo_work/AIFAC_P01_047
 
+# Debug
+sbatch $LEONARDO_FAST/project/flower_vla_pret/scripts/leonardo/sbatch_debug.sh
+# Train
 sbatch $LEONARDO_FAST/project/flower_vla_pret/scripts/leonardo/sbatch_debug.sh
 ```
 
@@ -22,7 +22,11 @@ sbatch $LEONARDO_FAST/project/flower_vla_pret/scripts/leonardo/sbatch_debug.sh
 ```bash
 squeue -u $USER
 # Once it starts tail the output
+# Debug
 cat flowervla-dbg_*.out
+# Train
+cat flowervla_*.out
+cat flowervla_*.err
 ```
 
 ## Sync with wandb
