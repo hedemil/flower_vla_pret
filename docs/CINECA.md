@@ -8,18 +8,6 @@ step ssh login 'emhed@kth.se' --provisioner cineca-hpc
 ssh ehed0000@login.leonardo.cineca.it
 ```
 
-## Pre-comp stats for datasets
-```bash
-tmux new -s stats
-source $LEONARDO_WORK/project/venvs/flowervla/bin/activate
-sbatch $LEONARDO_FAST/project/flower_vla_pret/scripts/leonardo/sbatch_precompute_stats.sh
-
-squeue -u $USER
-# Tail output
-cat droid-stats_*.out
-cat droid-stats_*.err
-```
-
 ## Start tmux session for training
 ```bash
 tmux new -s train

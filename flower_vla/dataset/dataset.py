@@ -588,6 +588,7 @@ def make_interleaved_dataset(
             if "dataset_frame_transform_kwargs" in dataset_kwargs
             else {}
         )
+        dataset_kwargs.pop("dataset_statistics", None)
         dataset, _ = make_dataset_from_rlds(
             **dataset_kwargs,
             train=train,
