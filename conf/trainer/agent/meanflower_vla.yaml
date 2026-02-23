@@ -8,7 +8,7 @@ lang_modalities: ${lang_modalities}
 target_modality: ${target_modality}
 
 agent: 
-  _target_: flower_vla.agents.flower.MeanFlowerVLA
+  _target_: flower_vla.agents.meanflower.MeanFlowerVLA
   _recursive_: false
   obs_modalities: ${obs_modalities}
   goal_modalities: ${goal_modalities}
