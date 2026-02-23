@@ -1,6 +1,6 @@
 defaults:
   - datamodule: oxe_data # uha_data
-  - trainer: flower_trainer # flower_trainer # baseline_trainer mode_trainer
+  - trainer: flower_trainer # meanflower_trainer # flower_trainer # baseline_trainer mode_trainer
 
 DATA_NAME: cross_x_no_kit # cross_x # simpler_env #real_kitchen_droid_co_training
 
