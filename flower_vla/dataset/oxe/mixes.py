@@ -320,6 +320,21 @@ CROSS_X_MIX = [
     # ("aloha_mobile", 6.0),
 ]
 
+CROSS_X_NO_KIT = [
+    # DELTA EEF
+    ("bridge_dataset", 4.2),
+    ("fractal20220817_data", 2.2),
+    ("dobbe", 2.0),
+    ("bc_z", 0.8),
+    ("cmu_play_fusion", 6.0),
+    ("libero_10_no_noops", 16.0),
+    ("libero_goal_no_noops", 16.0),
+    ("stanford_hydra_dataset_converted_externally_to_rlds", 6.0),
+    # JOINT STATE
+    ("droid", 0.45),
+    ("robo_set", 3.0),
+]
+
 FLOWER_EEF_MIX = [
     ("eef_droid", 0.35),
     ("bridge_dataset", 4.0),
@@ -378,7 +393,7 @@ OXE_NAMED_MIXES = {
     "droid": DROID,
     "trinity": TRINITY,
     "cross_x": CROSS_X_MIX,
-    "bridge_only": BRIDGE_ONLY,
+    "cross_x_no_kit": CROSS_X_NO_KIT,
     "action_mixed": ACTION_MIXED,
     'test': TEST,
     "flowereef": FLOWER_EEF_MIX,

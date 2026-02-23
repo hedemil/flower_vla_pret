@@ -497,7 +497,6 @@ class DatasetStatisticsComputer:
 
 def compute_dataset_statistics(
     builder: tfds.builder,
-    filter_functions: Sequence[ModuleSpec],
     ignore_errors: bool,
     restructure_fn: Callable,
     proprio_obs_key: Optional[str],
@@ -512,10 +511,6 @@ def compute_dataset_statistics(
         shuffle=False
     )
     
-    # Apply filters
-    for filter_fcn_spec in filter_functions:
-        full_dataset = full_dataset.filter(ModuleSpec.instantiate(filter_fcn_spec))
-    
     if ignore_errors:
         full_dataset = full_dataset.ignore_errors()
         
@@ -529,7 +524,6 @@ def compute_dataset_statistics(
         str(builder.info),
         str(proprio_obs_key),
         ModuleSpec.to_string(standardize_fn) if standardize_fn is not None else "",
-        *map(ModuleSpec.to_string, filter_functions),
     )
     
     # Create unique hash

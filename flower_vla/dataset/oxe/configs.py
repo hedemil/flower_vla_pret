@@ -12,11 +12,19 @@ Target configuration:
     proprio_encoding: Type of proprio encoding used
     action_encoding: Type of action encoding used, e.g. EEF position vs joint position control
 """
+import os
 from enum import IntEnum
 
 from flower_vla.dataset.utils.data_utils import filter_by_language_key
 from flower_vla.dataset.utils.spec import ModuleSpec
 from flower_vla.dataset.utils.droid_utils import zero_action_filter, joint_zero_action_filter, joint_vel_zero_action_filter
+
+# Configurable data directories via environment variables
+_DEFAULT_DATA_DIR = os.environ.get("OXE_DATA_DIR", "~/tensorflow_datasets")
+_LIBERO_DATA_DIR = os.environ.get("OXE_LIBERO_DIR", "~/tensorflow_datasets/modified_libero_rlds")
+
+# Package-relative path for DROID annotations (immune to Hydra cwd changes)
+_ANNOTATIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "utils")
 
 pnp_task_list_bridge  =  ["put", "pick", "take", "pnp", "icra", "rss", "many_skills", "lift_bowl", "move_drying", "wipe", "right_pepper", "topple", "upright", "flip"]
 
@@ -54,7 +62,7 @@ OXE_DATASET_CONFIGS = {
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
         "language_key": "language_instruction",
         "proprio_obs_key": "proprio",
-        "data_dir": "~/tensorflow_datasets",
+        "data_dir": _DEFAULT_DATA_DIR,
     },
     #################Aloha Sim Insertion#######################
     "aloha_sim_insertion": {
@@ -64,7 +72,7 @@ OXE_DATASET_CONFIGS = {
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
         "language_key": "language_instruction",
         "proprio_obs_key": "proprio",
-        "data_dir": "~/tensorflow_datasets",
+        "data_dir": _DEFAULT_DATA_DIR,
     },
     ###########################################################
 
@@ -82,7 +90,7 @@ OXE_DATASET_CONFIGS = {
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.JOINT_POS,
         "proprio_obs_key": "proprio",  # And this here
-        "data_dir": "/home/emil/tensorflow_datasets",
+        "data_dir": _DEFAULT_DATA_DIR,
         "language_key": "language_instruction", # chose "language_instruction*" for all languages texts available,
         # "shuffle": False,
     },
@@ -92,7 +100,7 @@ OXE_DATASET_CONFIGS = {
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.JOINT_POS,
         "proprio_obs_key": "proprio",
-        "data_dir": "/home/emil/tensorflow_datasets",
+        "data_dir": _DEFAULT_DATA_DIR,
         # "shuffle": False,
     },
     "droid": {
@@ -108,7 +116,7 @@ OXE_DATASET_CONFIGS = {
         "proprio_obs_key": "proprio",
         "standardize_fn": ModuleSpec.create(
             "flower_vla.dataset.utils.droid_lang_transform:DROIDLanguageTransform",
-            annotations_path="flower/dataset/utils/droid_language_annotations.json"
+            annotations_path=os.path.join(_ANNOTATIONS_DIR, "droid_language_annotations.json")
         ),
         "filter_functions": (ModuleSpec.create(
             filter_by_language_key,
@@ -136,7 +144,7 @@ OXE_DATASET_CONFIGS = {
         "proprio_obs_key": "proprio",
         "standardize_fn": ModuleSpec.create(
             "flower_vla.dataset.utils.droid_lang_transform:DROIDLanguageTransform",
-            annotations_path="flower/dataset/utils/droid_language_annotations.json"
+            annotations_path=os.path.join(_ANNOTATIONS_DIR, "droid_language_annotations.json")
         ),
         "filter_functions": (ModuleSpec.create(
             filter_by_language_key,
@@ -164,7 +172,7 @@ OXE_DATASET_CONFIGS = {
         "proprio_obs_key": "proprio",
         "standardize_fn": ModuleSpec.create(
             "flower_vla.dataset.utils.droid_lang_transform:DROIDLanguageTransform",
-            annotations_path="flower/dataset/utils/droid_language_annotations.json"
+            annotations_path=os.path.join(_ANNOTATIONS_DIR, "droid_language_annotations.json")
         ),
         # Add filter to ensure we only use trajectories that have the additional annotations
         "filter_functions": (ModuleSpec.create(
@@ -206,10 +214,7 @@ OXE_DATASET_CONFIGS = {
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
-        # "data_dir": "~/tensorflow_datasets",
-        "data_dir": "/home/emil/tensorflow_datasets",
-        # "data_dir": "/hkfs/work/workspace/scratch/ft4740-play3",
-        # "data_dir": "/hkfs/work/workspace/scratch/unesl-datasets/rail.eecs.berkeley.edu/datasets/bridge_release/data/tfds",
+        "data_dir": _DEFAULT_DATA_DIR,
     },
     "taco_play": {
         "image_obs_keys": {
@@ -287,7 +292,7 @@ OXE_DATASET_CONFIGS = {
         "action_encoding": ActionEncoding.EEF_POS,
         # "action_encoding": ActionEncoding.JOINT_POS,
         "proprio_obs_key": "proprio", 
-        # "data_dir": "~/tensorflow_datasets",
+        # "data_dir": _DEFAULT_DATA_DIR,
         # "data_dir": "/hkfs/work/workspace/scratch/unesl-datasets",
     },
     "language_table": {
@@ -464,16 +469,14 @@ OXE_DATASET_CONFIGS = {
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.JOINT_POS,
-        "data_dir": "~/tensorflow_datasets",
-        # "data_dir": "/hkfs/work/workspace/scratch/unesl-datasets",
+        "data_dir": _DEFAULT_DATA_DIR,
     },
     "berkeley_rpt_converted_externally_to_rlds": {
         "image_obs_keys": {"primary": None, "secondary": None, "wrist": "hand_image"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.JOINT_POS,
-        "data_dir": "~/tensorflow_datasets",
-        # "data_dir": "/hkfs/work/workspace/scratch/unesl-datasets",
+        "data_dir": _DEFAULT_DATA_DIR,
     },
     "kaist_nonprehensile_converted_externally_to_rlds": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
@@ -628,7 +631,7 @@ OXE_DATASET_CONFIGS = {
         "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL_NAV,
         "proprio_obs_key": "proprio",
-        # "data_dir": "~/tensorflow_datasets",
+        # "data_dir": _DEFAULT_DATA_DIR,
         # "data_dir": "/hkfs/work/workspace/scratch/unesl-datasets",
     },
     "fmb": {
@@ -696,7 +699,7 @@ OXE_DATASET_CONFIGS = {
         "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
         "proprio_obs_key": "proprio",
-        "data_dir": "/home/reuss/.cache/huggingface/hub/datasets--oier-mees--BiPlay/snapshots/6af6c5ca72bbe40b0a3db80adca041b6adf526c1/BiPlay", # aloha_play_dataset/1.0.0
+        "data_dir": os.environ.get("OXE_ALOHA_PLAY_DIR", _DEFAULT_DATA_DIR),
     },
     ### LIBERO datasets (modified versions)
     "libero_spatial_no_noops": {
@@ -704,8 +707,7 @@ OXE_DATASET_CONFIGS = {
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
-        # "data_dir": "~/tensorflow_datasets/modified_libero_rlds",
-        "data_dir": "/home/emil/tensorflow_datasets/modified_libero_rlds",
+        "data_dir": _LIBERO_DATA_DIR,
         "proprio_obs_key": "proprio",
     },
     "libero_object_no_noops": {
@@ -713,8 +715,7 @@ OXE_DATASET_CONFIGS = {
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
-        # "data_dir": "~/tensorflow_datasets/modified_libero_rlds",
-        "data_dir": "/home/emil/tensorflow_datasets/modified_libero_rlds",
+        "data_dir": _LIBERO_DATA_DIR,
         "proprio_obs_key": "proprio",
     },
     "libero_goal_no_noops": {
@@ -722,8 +723,7 @@ OXE_DATASET_CONFIGS = {
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
-        # "data_dir": "~/tensorflow_datasets/modified_libero_rlds",
-        "data_dir": "/home/emil/tensorflow_datasets/modified_libero_rlds",
+        "data_dir": _LIBERO_DATA_DIR,
         "proprio_obs_key": "proprio",
     },
     "libero_10_no_noops": {
@@ -731,8 +731,7 @@ OXE_DATASET_CONFIGS = {
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
-        # "data_dir": "~/tensorflow_datasets/modified_libero_rlds",
-        "data_dir": "/home/emil/tensorflow_datasets/modified_libero_rlds",
+        "data_dir": _LIBERO_DATA_DIR,
         "proprio_obs_key": "proprio",
     },
    #################Calvin Debug#######################
@@ -743,8 +742,7 @@ OXE_DATASET_CONFIGS = {
         "action_encoding": ActionEncoding.EEF_POS,
         "language_key": "language_instruction",
         "proprio_obs_key": "proprio",
-        #"data_dir": "~/tensorflow_datasets",
-        "data_dir": "/hkfs/work/workspace/scratch/lx7270-flower/Codes/tensorflow_datasets",
+        "data_dir": _DEFAULT_DATA_DIR,
     },
     #################Aloha Sim Transfer#######################
     "aloha_sim_transfer": {
@@ -754,7 +752,7 @@ OXE_DATASET_CONFIGS = {
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
         "language_key": "language_instruction",
         "proprio_obs_key": "proprio",
-        "data_dir": "~/tensorflow_datasets",
+        "data_dir": _DEFAULT_DATA_DIR,
     },
     #################Aloha Sim Insertion#######################
     "aloha_sim_insertion": {
@@ -764,7 +762,7 @@ OXE_DATASET_CONFIGS = {
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
         "language_key": "language_instruction",
         "proprio_obs_key": "proprio",
-        "data_dir": "~/tensorflow_datasets",
+        "data_dir": _DEFAULT_DATA_DIR,
     },
     ###########################################################
 }
