@@ -58,6 +58,7 @@ source "${VENV_DIR}/bin/activate"
 
 # --- Environment variables for offline operation ---
 export HYDRA_FULL_ERROR=1
+export TORCHELASTIC_ERROR_FILE="${OUTPUT_DIR}/elastic_error_${SLURM_JOB_ID}.json"
 export WANDB_MODE=offline
 export WANDB_DIR="${WANDB_DIR}"
 export TRANSFORMERS_OFFLINE=1
@@ -89,6 +90,20 @@ if [ ! -d "${DATA_DIR}" ]; then
     echo "ERROR: Data directory not found: ${DATA_DIR}"
     exit 1
 fi
+
+# --- Quick data integrity check: verify no git-lfs pointer files ---
+for ds in libero_10_no_noops libero_goal_no_noops; do
+    first_tfrecord=$(find "${DATA_DIR}/modified_libero_rlds/${ds}" -name "*.tfrecord*" 2>/dev/null | head -1)
+    if [ -n "$first_tfrecord" ]; then
+        size=$(stat --format=%s "$first_tfrecord" 2>/dev/null || echo 0)
+        if [ "$size" -lt 1000 ]; then
+            echo "WARNING: ${ds} tfrecord is only ${size} bytes — may be an LFS pointer file"
+            echo "  Run: cd ${DATA_DIR}/modified_libero_rlds && git lfs pull"
+        fi
+    else
+        echo "WARNING: No tfrecord files found for ${ds}"
+    fi
+done
 
 # --- Diagnostics ---
 echo "=== FlowerVLA Training on LEONARDO ==="

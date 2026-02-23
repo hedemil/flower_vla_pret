@@ -423,7 +423,7 @@ def make_dataset_from_rlds(
             dataset_statistics = json.load(f)
     elif dataset_statistics is None:
         dataset_statistics = compute_dataset_statistics(
-            builder, filter_functions, ignore_errors, restructure,
+            builder, ignore_errors, restructure,
             proprio_obs_key, standardize_fn, force_recompute_dataset_statistics
         )
     
