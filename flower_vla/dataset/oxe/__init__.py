@@ -108,6 +108,12 @@ def make_oxe_dataset_kwargs(
     if force_recompute_dataset_statistics:
         dataset_kwargs["force_recompute_dataset_statistics"] = True
 
+    # Use pre-computed dataset statistics if available
+    stats_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "conf", "datamodule", "data_statistics")
+    stats_file = os.path.join(stats_dir, f"{name}.yaml")
+    if os.path.exists(stats_file) and "dataset_statistics" not in dataset_kwargs:
+        dataset_kwargs["dataset_statistics"] = stats_file
+
     return {"name": name, "data_dir": data_dir, **dataset_kwargs}
 
 
