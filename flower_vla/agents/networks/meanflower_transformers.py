@@ -214,6 +214,10 @@ class FlowerAttention(nn.Module):
             causal_mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=q.device), diagonal=1)
             attn_weights = attn_weights.masked_fill(causal_mask, fill_value)
         
+        # DEBUG PRINTS
+        print(f"Attention weights dtype: {attn_weights.dtype}, device: {attn_weights.device}")
+        print(f"Mask dtype: {mask.dtype if mask is not None else 'N/A'}, device: {mask.device if mask is not None else 'N/A'}")
+        print(f"Query, Key, Value dtypes: {q.dtype}, {k.dtype}, {v.dtype}, device: {q.device}, {k.device}, {v.device}")
         attn_weights = F.softmax(attn_weights, dim=-1)
         attn_weights = self.attn_dropout(attn_weights)
         attn_output = torch.matmul(attn_weights, v)

@@ -575,6 +575,8 @@ class MeanFlowerVLA(nn.Module):
 
             loss = loss_per_sample.mean()
 
+        # DEBUG PRINTS
+        print(f"DTPYES: texp={texp.dtype}, rexp={rexp.dtype}, h={h.dtype}, dtdt={dtdt.dtype}, drdt={drdt.dtype}, z={z.dtype}, v={v.dtype}")
         # Monitor metrics
         with torch.no_grad():
             valid_u = u_pred[valid_mask]
