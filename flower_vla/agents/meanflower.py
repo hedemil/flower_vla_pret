@@ -575,7 +575,7 @@ class MeanFlowerVLA(nn.Module):
         # Monitor metrics
         with torch.no_grad():
             valid_u = u_pred[valid_mask]
-            valid_v = v_f32[valid_mask]
+            valid_v = v[valid_mask]
             v_loss = ((valid_u - valid_v) ** 2).mean()
 
         # Check for NaN/Inf in outputs
@@ -648,9 +648,12 @@ class MeanFlowerVLA(nn.Module):
             t: Sampled timesteps [B, 1, 1]
             r: Sampled timesteps [B, 1, 1]
         """
-        t = self.noise_distribution()(b)
-        r = self.noise_distribution()(b)
+        dtype = next(self.parameters()).dtype # Get model dtype (bf16)
 
+        # Ensure these are cast
+        t = self.noise_distribution()(b).to(device=self.device, dtype=dtype)
+        r = self.noise_distribution()(b).to(device=self.device, dtype=dtype)
+        
         # Ensure t >= r element-wise
         t, r = torch.maximum(t, r), torch.minimum(t, r)
 
