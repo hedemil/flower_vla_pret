@@ -3,7 +3,10 @@
 Run this once before training so the expensive statistics computation
 doesn't block 4 GPUs during the actual training job.
 
-Usage (on Leonardo):
+Usage (on Leonardo via sbatch):
+    sbatch scripts/leonardo/sbatch_precompute_stats.sh
+
+Or directly:
     python scripts/leonardo/precompute_droid_stats.py \
         --data_dir $LEONARDO_WORK/project/data/tensorflow_datasets
 """
@@ -15,11 +18,7 @@ import os
 # Ensure the project root is on the path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-import tensorflow as tf
-import tensorflow_datasets as tfds
-
-from flower_vla.dataset.utils.rlds_utils import compute_dataset_statistics
-from flower_vla.dataset.utils.spec import ModuleSpec
+from flower_vla.dataset.dataset import make_dataset_from_rlds
 from flower_vla.dataset.oxe.configs import OXE_DATASET_CONFIGS
 
 
@@ -27,50 +26,28 @@ def precompute_stats(data_dir: str, dataset_name: str = "droid"):
     """Compute and cache dataset statistics for the given dataset."""
     config = OXE_DATASET_CONFIGS[dataset_name]
 
-    # Resolve the tfds builder name (same logic as dataset.py line 417)
-    builder_name = dataset_name
-    if dataset_name in ("eef_droid", "delta_droid"):
-        builder_name = "droid"
-    elif dataset_name == "bc_z":
-        builder_name = "bc_z:0.1.0"
-    elif dataset_name == "kit_irl_real_kitchen_lang_delta":
-        builder_name = "kit_irl_real_kitchen_lang"
+    print(f"Pre-computing statistics for dataset '{dataset_name}'")
+    print(f"Data directory: {data_dir}")
+    print(f"Config: {config}")
+    print()
 
-    print(f"Loading builder '{builder_name}' from {data_dir}")
-    builder = tfds.builder(builder_name, data_dir=data_dir)
-
-    # Build the restructure function (same as dataset.py)
-    from flower_vla.dataset.dataset import DatasetUtils
-    proprio_obs_key = config.get("proprio_obs_key")
-    standardize_fn = config.get("standardize_fn")
-
-    image_obs_keys = config.get("image_obs_keys", {})
-    depth_obs_keys = config.get("depth_obs_keys", {})
-    language_key = config.get("language_key")
-
-    restructure = DatasetUtils.create_restructure_fn(
-        builder_name.split(":")[0],
-        image_obs_keys=image_obs_keys,
-        depth_obs_keys=depth_obs_keys,
-        proprio_obs_key=proprio_obs_key,
-        language_key=language_key,
-        standardize_fn=standardize_fn,
+    # Call make_dataset_from_rlds with train=False just to trigger
+    # the statistics computation and caching. The returned dataset
+    # object itself is not needed.
+    make_dataset_from_rlds(
+        name=dataset_name,
+        data_dir=data_dir,
+        train=True,
+        image_obs_keys=config.get("image_obs_keys", {}),
+        depth_obs_keys=config.get("depth_obs_keys", {}),
+        proprio_obs_key=config.get("proprio_obs_key"),
+        language_key=config.get("language_key"),
+        standardize_fn=config.get("standardize_fn"),
+        ignore_errors=config.get("ignore_errors", False),
     )
 
-    print(f"Computing statistics for '{dataset_name}' (builder: '{builder_name}')...")
-    print("This will iterate through all trajectories — may take a while for large datasets.")
-
-    stats = compute_dataset_statistics(
-        builder=builder,
-        ignore_errors=False,
-        restructure_fn=restructure,
-        proprio_obs_key=proprio_obs_key,
-        standardize_fn=standardize_fn,
-        force_recompute=False,  # Will skip if cache already exists
-    )
-
-    print(f"Done! Statistics: {stats.get('num_trajectories', '?')} trajectories, "
-          f"{stats.get('num_transitions', '?')} transitions")
+    print(f"\nDone! Statistics for '{dataset_name}' are now cached.")
+    print("Future training runs will load them instantly.")
 
 
 if __name__ == "__main__":
