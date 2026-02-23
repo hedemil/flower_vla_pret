@@ -57,7 +57,7 @@ def setup_accelerator(cfg, single_loader):
             static_graph=cfg.static_graph,
         )
         process_group_kwargs = InitProcessGroupKwargs(
-            timeout=timedelta(seconds=1800)
+            timeout=timedelta(seconds=7200)
         )
         
         accelerator = Accelerator(

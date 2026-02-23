@@ -26,11 +26,11 @@ def setup_environment(gpu_id="0"):
 
 def setup_paths(debug_mode=True,):
     """Setup paths for data and logging."""
-    maniskill_data_path = '/home/reuss/code/flower_vla_policy/SimplerEnv/ManiSkill2_real2sim/data'
-    base_log_dir = "/home/reuss/code/flower_vla/results"
+    project_root = os.environ.get("PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
+    maniskill_data_path = os.path.join(project_root, "SimplerEnv", "ManiSkill2_real2sim", "data")
+    base_log_dir = os.path.join(project_root, "results")
     log_dir = base_log_dir if not debug_mode else f"{base_log_dir}_debug"
-    
-    # Model paths
+
     return maniskill_data_path, log_dir
 
 def get_task_configs(maniskill_data_path, log_dir, ckpt):
@@ -211,12 +211,11 @@ def main_evaluation():
         "use_dopri5": False,
         "cfg_lambda": 1.0,
     }
-    debug_mode = False  # Set to False for full evaluation
+    debug_mode = True  # Set to False for full evaluation
 
-    model_base_dir = "/home/reuss/code/flower_vla/horeka_trains/"
-    ckpt = '10-17-new-repo/checkpoint_360000'
-    model_base_dir = '/home/reuss/code/flower_vla/logs/runs/2025-06-12/'
-    ckpt = '18-49-48/checkpoint_500000'
+    project_root = os.environ.get("PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
+    model_base_dir = project_root
+    ckpt = 'checkpoints/checkpoint_360000'
     # Initialize wandb
     run_name = f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     wandb.init(

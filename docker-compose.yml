@@ -1,0 +1,26 @@
+services:
+  flower-eval:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    environment:
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - DISPLAY=:99
+      - HF_HOME=/home/appuser/.cache/huggingface
+      - MPLCONFIGDIR=/tmp/matplotlib
+    volumes:
+      - ./checkpoints:/app/checkpoints
+      - ./SimplerEnv/ManiSkill2_real2sim/data:/app/SimplerEnv/ManiSkill2_real2sim/data
+      - ${HF_HOME:-${HOME}/.cache/huggingface}:/home/appuser/.cache/huggingface
+      - ./results:/app/results
+      - ./results_debug:/app/results_debug
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
