@@ -538,21 +538,12 @@ class MeanFlowerVLA(nn.Module):
         dtdt = torch.ones_like(texp)
         drdt = torch.zeros_like(rexp)
 
-        # Compute u and du/dt using JVP (run in fp32 for numerical stability)
+        # Compute u and du/dt using JVP (run in bf16, matching model weights)
         with torch.amp.autocast("cuda", enabled=False):
-            z_f32 = z.float()
-            texp_f32 = texp.float()
-            rexp_f32 = rexp.float()
-            v_f32 = v.float()
-            drdt_f32 = drdt.float()
-            dtdt_f32 = dtdt.float()
-
-            # JVP returns: (u, du/dz * v + du/dt * dtdt + du/dr * drdt)
-            # drdt = 0, dtdt = 1, so we get: (u, du/dz * v + du/dt)
             u_pred, dudt = torch.func.jvp(
                 u_func,
-                (z_f32, texp_f32, rexp_f32),
-                (v_f32, dtdt_f32, drdt_f32)
+                (z, texp, rexp),
+                (v, dtdt, drdt)
             )
 
             # u_tgt = v - h * du/dt
@@ -830,7 +821,7 @@ class MeanFlowerVLA(nn.Module):
 
         # Apply CFG dropout on freq_embeds and proprio_embeds only
         if self.training and self.cfg_dropout > 0:
-            drop_mask = (torch.rand(freq_embeds.size(0), device=freq_embeds.device) < self.cfg_dropout).float().unsqueeze(1)
+            drop_mask = (torch.rand(freq_embeds.size(0), device=freq_embeds.device) < self.cfg_dropout).to(dtype=dtype).unsqueeze(1)
             freq_embeds = freq_embeds * (1 - drop_mask)
             proprio_embeds = proprio_embeds * (1 - drop_mask)
 
