@@ -64,6 +64,7 @@ class SwiGlu(nn.Module):
         """
         Forward pass through SwiGlu MLP.
         """
+        x = x.to(dtype=self.fc1.weight.dtype)  # Ensure dtype match under no-autocast JVP
         x1 = F.silu(self.fc1(x))
         x2 = self.fc2(x)
         x = x1 * x2
@@ -180,6 +181,7 @@ class FlowerAttention(nn.Module):
             Tensor of shape [B, seq_len, dim] after attention and projection.
         """
         B, T, C = x.size()
+        x = x.to(dtype=self.qkv.weight.dtype)  # Ensure dtype match under no-autocast JVP
         # Compute query, key, value and reshape for multi-head attention.
         qkv = self.qkv(x).reshape(B, T, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
@@ -214,10 +216,6 @@ class FlowerAttention(nn.Module):
             causal_mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=q.device), diagonal=1)
             attn_weights = attn_weights.masked_fill(causal_mask, fill_value)
         
-        # DEBUG PRINTS
-        print(f"Attention weights dtype: {attn_weights.dtype}, device: {attn_weights.device}")
-        print(f"Mask dtype: {mask.dtype if mask is not None else 'N/A'}, device: {mask.device if mask is not None else 'N/A'}")
-        print(f"Query, Key, Value dtypes: {q.dtype}, {k.dtype}, {v.dtype}, device: {q.device}, {k.device}, {v.device}")
         attn_weights = F.softmax(attn_weights, dim=-1)
         attn_weights = self.attn_dropout(attn_weights)
         attn_output = torch.matmul(attn_weights, v)
@@ -293,6 +291,9 @@ class FlowerCrossAttention(nn.Module):
         """
         B, T, C = x.size()
         _, S, _ = context.size()
+        dtype = self.q_proj.weight.dtype
+        x = x.to(dtype=dtype)
+        context = context.to(dtype=dtype)
         q = self.q_proj(x).reshape(B, T, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
         k = self.k_proj(context).reshape(B, S, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
         v = self.v_proj(context).reshape(B, S, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
