@@ -539,52 +539,52 @@ class MeanFlowerVLA(nn.Module):
         drdt = torch.zeros_like(rexp)
 
         # Compute u and du/dt using JVP (run in fp32 for numerical stability)
-        # with torch.amp.autocast("cuda", enabled=False):
-            # z_f32 = z.float()
-            # texp_f32 = texp.float()
-            # rexp_f32 = rexp.float()
-            # v_f32 = v.float()
-            # drdt_f32 = drdt.float()
-            # dtdt_f32 = dtdt.float()
+        with torch.amp.autocast("cuda", enabled=False):
+            z_f32 = z.float()
+            texp_f32 = texp.float()
+            rexp_f32 = rexp.float()
+            v_f32 = v.float()
+            drdt_f32 = drdt.float()
+            dtdt_f32 = dtdt.float()
 
-        # JVP returns: (u, du/dz * v + du/dt * dtdt + du/dr * drdt)
-        # drdt = 0, dtdt = 1, so we get: (u, du/dz * v + du/dt)
-        u_pred, dudt = torch.func.jvp(
-            u_func,
-            (z, texp, rexp),
-            (v, dtdt, drdt)
-        )
+            # JVP returns: (u, du/dz * v + du/dt * dtdt + du/dr * drdt)
+            # drdt = 0, dtdt = 1, so we get: (u, du/dz * v + du/dt)
+            u_pred, dudt = torch.func.jvp(
+                u_func,
+                (z_f32, texp_f32, rexp_f32),
+                (v_f32, dtdt_f32, drdt_f32)
+            )
 
-        # u_tgt = v - h * du/dt
-        h = (texp - rexp).clamp(min=0.0, max=1.0)
-        u_tgt = (v - h * dudt).detach()
+            # u_tgt = v - h * du/dt
+            h = (texp - rexp).clamp(min=0.0, max=1.0)
+            u_tgt = (v - h * dudt).detach()
 
-        # Build valid mask
-        valid_mask = torch.zeros_like(actions, dtype=torch.bool)
-        for action_name, action_idx in self.action_space_index.action_spaces.items():
-            mask = (action_type == action_idx)
-            if mask.any():
-                adim = self.action_space_index.get_action_dim(action_idx)
-                mask_expanded = mask.view(-1, 1, 1).expand(-1, actions.size(1), adim).to(device)
-                valid_mask[mask, :, :adim] = mask_expanded[mask]
+            # Build valid mask
+            valid_mask = torch.zeros_like(actions, dtype=torch.bool)
+            for action_name, action_idx in self.action_space_index.action_spaces.items():
+                mask = (action_type == action_idx)
+                if mask.any():
+                    adim = self.action_space_index.get_action_dim(action_idx)
+                    mask_expanded = mask.view(-1, 1, 1).expand(-1, actions.size(1), adim).to(device)
+                    valid_mask[mask, :, :adim] = mask_expanded[mask]
 
-        # Compute loss only over valid dimensions
-        diff = u_pred - u_tgt
-        diff = diff * valid_mask.float()
-        loss_per_sample = (diff ** 2).sum(dim=(1, 2))
+            # Compute loss only over valid dimensions
+            diff = u_pred - u_tgt
+            diff = diff * valid_mask.float()
+            loss_per_sample = (diff ** 2).sum(dim=(1, 2))
 
-        # Adaptive weighting
-        norm_eps = 0.01
-        norm_p = 1.0
-        adp_wt = (loss_per_sample.detach() + norm_eps) ** norm_p
-        loss_per_sample = loss_per_sample / adp_wt
+            # Adaptive weighting
+            norm_eps = 0.01
+            norm_p = 1.0
+            adp_wt = (loss_per_sample.detach() + norm_eps) ** norm_p
+            loss_per_sample = loss_per_sample / adp_wt
 
-        loss = loss_per_sample.mean()
+            loss = loss_per_sample.mean()
 
         # Monitor metrics
         with torch.no_grad():
             valid_u = u_pred[valid_mask]
-            valid_v = v[valid_mask]
+            valid_v = v_f32[valid_mask]
             v_loss = ((valid_u - valid_v) ** 2).mean()
 
         # Check for NaN/Inf in outputs
