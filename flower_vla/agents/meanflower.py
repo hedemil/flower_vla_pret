@@ -404,12 +404,11 @@ class MeanFlowerVLA(nn.Module):
         merged_embeds = torch.cat([task_prompt.to(image_features.device), image_features, text_embeds.to(image_features.device)], dim=1)
 
         # get attention mask from txt
-        attention_mask = torch.ones(merged_embeds.shape[:2], device=merged_embeds.device)
         lang_attention_mask = batch[self.goal_modalities][self.lang_modalities[0]]['attention_mask'].to(device).squeeze(1)
-        # define attention mask for image
-        vis_attention_mask = torch.ones(image_features.shape[:2], device=image_features.device)
+        # define attention mask for image — use bool dtype throughout for cross-attention compatibility
+        vis_attention_mask = torch.ones(image_features.shape[:2], dtype=torch.bool, device=image_features.device)
         prompt_mask = torch.zeros(B, 1, dtype=torch.bool, device=image_features.device)
-        attention_mask = torch.cat([prompt_mask, vis_attention_mask, lang_attention_mask], dim=1)
+        attention_mask = torch.cat([prompt_mask, vis_attention_mask, lang_attention_mask.bool()], dim=1)
 
         features = self.vlm.get_encoder()(
             inputs_embeds=merged_embeds, 
@@ -426,7 +425,7 @@ class MeanFlowerVLA(nn.Module):
             text_start = prompt_length + image_length
             text_end = text_start + text_length  # text features occupy features[:, text_start:text_end, :]
             # Create a dropout mask for the entire batch (per example)
-            drop_mask = (torch.rand(B, device=device) < self.cfg_dropout).float().view(B, 1, 1)
+            drop_mask = (torch.rand(B, device=device) < self.cfg_dropout).to(dtype=default_dtype).view(B, 1, 1)
             # Apply the mask only to the text portion of the features.
             features[:, text_start:text_end, :] = features[:, text_start:text_end, :] * (1 - drop_mask)
 
@@ -564,7 +563,7 @@ class MeanFlowerVLA(nn.Module):
 
             # Compute loss only over valid dimensions
             diff = u_pred - u_tgt
-            diff = diff * valid_mask.float()
+            diff = diff * valid_mask.to(dtype=default_dtype)
             loss_per_sample = (diff ** 2).sum(dim=(1, 2))
 
             # Adaptive weighting
@@ -575,8 +574,6 @@ class MeanFlowerVLA(nn.Module):
 
             loss = loss_per_sample.mean()
 
-        # DEBUG PRINTS
-        print(f"DTPYES: texp={texp.dtype}, rexp={rexp.dtype}, h={h.dtype}, dtdt={dtdt.dtype}, drdt={drdt.dtype}, z={z.dtype}, v={v.dtype}")
         # Monitor metrics
         with torch.no_grad():
             valid_u = u_pred[valid_mask]
@@ -815,6 +812,10 @@ class MeanFlowerVLA(nn.Module):
         """
         B, t_seq, d = z.shape
         dtype = next(self.parameters()).dtype
+        # Ensure all inputs are in model dtype (critical inside no-autocast JVP block)
+        z = z.to(dtype=dtype)
+        t = t.to(dtype=dtype)
+        h = h.to(dtype=dtype)
         # Extract and process conditioning inputs
         cond = self.cond_linear(self.cond_norm(cond_dict['features'].to(dtype)))
         freq_embeds = cond_dict['frequency_embeds'].squeeze(1).to(dtype)
@@ -864,7 +865,7 @@ class MeanFlowerVLA(nn.Module):
         dtype = next(self.parameters()).dtype
         
         if not self.use_proprio:
-            return torch.zeros(batch_size, self.dit_dim, device=self.device)
+            return torch.zeros(batch_size, self.dit_dim, device=self.device, dtype=dtype)
         
         encoded = torch.zeros(batch_size, self.dit_dim, device=self.device, dtype=dtype)
         for action_name, action_idx in self.action_space_index.action_spaces.items():

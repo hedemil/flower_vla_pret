@@ -554,7 +554,9 @@ class FreqEmbedder(nn.Module):
         return embedding
 
     def forward(self, t):
-        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+        t_freq = self.timestep_embedding(t, self.frequency_embedding_size).to(
+            dtype=next(self.parameters()).dtype
+        )
         t_emb = self.mlp(t_freq)
         return t_emb
 
@@ -614,7 +616,7 @@ class ZeroEncoder(nn.Module):
         self.device = device
 
     def forward(self, x):
-        return torch.zeros((x.shape[0], self.dit_dim), device=self.device)
+        return torch.zeros((x.shape[0], self.dit_dim), device=self.device, dtype=x.dtype)
     
 
 class MeanFlowDecoder(nn.Module):

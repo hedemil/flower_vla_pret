@@ -374,6 +374,7 @@ class AccelerateTrainer:
 
         except Exception as e:
             log.error(f"Training interrupted: {str(e)}")
+            log.error(f"Full traceback:\n{traceback.format_exc()}")
             self.store_model_weights(self.working_dir, f"{self.global_step}_")
             raise
         finally:
