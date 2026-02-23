@@ -203,12 +203,16 @@ class FlowerAttention(nn.Module):
         # )
         # Manual attention for JVP compatibility
         attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        
+        # ADDED: Get the current dtype for the fill value
+        fill_value = torch.tensor(float('-inf'), dtype=q.dtype, device=q.device)
 
         if mask is not None:
-            attn_weights = attn_weights.masked_fill(~mask, float('-inf'))
+            attn_weights = attn_weights.masked_fill(~mask, fill_value)
         elif is_causal:
+            # ALSO FIXED: Use the existing device/dtype for the causal mask creation
             causal_mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=q.device), diagonal=1)
-            attn_weights = attn_weights.masked_fill(causal_mask, float('-inf'))
+            attn_weights = attn_weights.masked_fill(causal_mask, fill_value)
         
         attn_weights = F.softmax(attn_weights, dim=-1)
         attn_weights = self.attn_dropout(attn_weights)
