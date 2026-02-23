@@ -96,7 +96,12 @@ fi
 
 # --- Quick data integrity check: verify no git-lfs pointer files ---
 for ds in libero_10_no_noops libero_goal_no_noops; do
-    first_tfrecord=$(find "${DATA_DIR}/modified_libero_rlds/${ds}" -name "*.tfrecord*" 2>/dev/null | head -1)
+    ds_dir="${DATA_DIR}/modified_libero_rlds/${ds}"
+    if [ ! -d "$ds_dir" ]; then
+        echo "WARNING: Dataset directory not found: ${ds_dir}"
+        continue
+    fi
+    first_tfrecord=$(find "$ds_dir" -name "*.tfrecord*" -print -quit 2>/dev/null || true)
     if [ -n "$first_tfrecord" ]; then
         size=$(stat --format=%s "$first_tfrecord" 2>/dev/null || echo 0)
         if [ "$size" -lt 1000 ]; then
