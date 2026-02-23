@@ -474,6 +474,7 @@ class MeanFlowerVLA(nn.Module):
             valid_dims: Valid dimensions mask [B, T, action_dim].
         """
         default_dtype = next(self.parameters()).dtype
+        h = h.to(dtype=default_dtype)
         B = z.shape[0]
         max_action_dim = self.action_dim
         decoded = torch.zeros(B, z.shape[1], max_action_dim, device=self.device, dtype=default_dtype)
@@ -503,14 +504,14 @@ class MeanFlowerVLA(nn.Module):
             actions = actions.squeeze(1)
         b = actions.size(0)
         device = actions.device
-        actions = actions.to(default_dtype)
+        actions = actions.to(dtype=default_dtype)
 
         # Sample t and r with constraint t >= r
         t, r = self.sample_tr(b)
 
         # Interpolate: z_t = (1 - t) * x + t * e
-        texp = t.view([b] + [1] * (actions.dim() - 1))
-        rexp = r.view([b] + [1] * (actions.dim() - 1))
+        texp = t.view([b] + [1] * (actions.dim() - 1)).to(dtype=default_dtype)
+        rexp = r.view([b] + [1] * (actions.dim() - 1)).to(dtype=default_dtype)
 
         # Sample noise per action space
         e = torch.zeros_like(actions)
@@ -525,7 +526,9 @@ class MeanFlowerVLA(nn.Module):
                 e[mask, :, :adim] = noise_slice
 
         z = (1 - texp) * actions + texp * e
+        z = z.to(dtype=default_dtype)
         v = e - actions  # target velocity
+        v = v.to(dtype=default_dtype)
 
         # Define network function for JVP
         def u_func(z_input, t_input, r_input):
@@ -535,8 +538,8 @@ class MeanFlowerVLA(nn.Module):
             return self.dit_forward_meanflow(z_input, t_flat, h_flat, cond)
 
         # Tangent vectors for JVP
-        dtdt = torch.ones_like(texp)
-        drdt = torch.zeros_like(rexp)
+        dtdt = torch.ones_like(texp).to(dtype=default_dtype)
+        drdt = torch.zeros_like(rexp).to(dtype=default_dtype)
 
         # Compute u and du/dt using JVP (run in bf16, matching model weights)
         with torch.amp.autocast("cuda", enabled=False):
