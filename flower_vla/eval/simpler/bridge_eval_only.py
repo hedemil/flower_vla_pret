@@ -211,7 +211,7 @@ def main_evaluation():
         "use_dopri5": False,
         "cfg_lambda": 1.0,
     }
-    debug_mode = True  # Set to False for full evaluation
+    debug_mode = False  # Set to False for full evaluation
 
     project_root = os.environ.get("PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
     model_base_dir = project_root

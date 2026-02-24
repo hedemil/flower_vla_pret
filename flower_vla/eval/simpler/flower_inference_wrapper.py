@@ -121,7 +121,12 @@ class UhaInference:
                 pt_path = os.path.join(checkpoint_path, pt_files[0])
                 print(f"Loading model from {pt_path}")
                 state_dict = torch.load(pt_path, map_location=device)
-                missing, unexpected = unwrapped.load_state_dict(state_dict, strict=False)
+                # Apply same key renaming as safetensors path
+                new_state_dict = {}
+                for key, value in state_dict.items():
+                    new_key = key.replace("c_fc1", "fc1").replace("c_fc2", "fc2").replace("c_proj", "proj")
+                    new_state_dict[new_key] = value
+                missing, unexpected = unwrapped.load_state_dict(new_state_dict, strict=False)
                 print(f"Missing keys: {len(missing)}")
                 print(f"Unexpected keys: {len(unexpected)}")
             else:
