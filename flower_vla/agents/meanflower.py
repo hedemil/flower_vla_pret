@@ -540,13 +540,29 @@ class MeanFlowerVLA(nn.Module):
         dtdt = torch.ones_like(texp).to(dtype=default_dtype)
         drdt = torch.zeros_like(rexp).to(dtype=default_dtype)
 
-        # Compute u and du/dt using JVP (run in bf16, matching model weights)
-        with torch.amp.autocast("cuda", enabled=False):
-            u_pred, dudt = torch.func.jvp(
-                u_func,
-                (z, texp, rexp),
-                (v, dtdt, drdt)
+        # Compute u and du/dt using JVP
+        # Monkey-patch nn.Linear to cast weights to input dtype during JVP,
+        # because torch.func.jvp dual tensors' .to(dtype) only casts the primal,
+        # not the tangent — so we cast weights (regular tensors) instead.
+        _orig_linear_forward = nn.Linear.forward
+
+        def _jvp_safe_linear_forward(self, input):
+            return F.linear(
+                input,
+                self.weight.to(input.dtype),
+                self.bias.to(input.dtype) if self.bias is not None else None,
             )
+
+        with torch.amp.autocast("cuda", enabled=False):
+            nn.Linear.forward = _jvp_safe_linear_forward
+            try:
+                u_pred, dudt = torch.func.jvp(
+                    u_func,
+                    (z, texp, rexp),
+                    (v, dtdt, drdt)
+                )
+            finally:
+                nn.Linear.forward = _orig_linear_forward
 
             # u_tgt = v - h * du/dt
             h = (texp - rexp).clamp(min=0.0, max=1.0)
