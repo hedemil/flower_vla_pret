@@ -524,9 +524,15 @@ class MeanFlowerVLA(nn.Module):
                 e[mask, :, :adim] = noise_slice
 
         z = (1 - texp) * actions + texp * e
-        z = z.to(dtype=default_dtype)
         v = e - actions  # target velocity
-        v = v.to(dtype=default_dtype)
+
+        # Cast to float32 for JVP — dual tensors must have matching dtype
+        # throughout. RmsNorm's JVP promotes tangents to float32, so if primals
+        # are bf16 we get mixed-dtype duals that crash F.linear.
+        z = z.float()
+        v = v.float()
+        texp = texp.float()
+        rexp = rexp.float()
 
         # Define network function for JVP
         def u_func(z_input, t_input, r_input):
@@ -535,19 +541,20 @@ class MeanFlowerVLA(nn.Module):
             h_flat = h_input.view(-1)
             return self.dit_forward_meanflow(z_input, t_flat, h_flat, cond)
 
-        # Tangent vectors for JVP
-        dtdt = torch.ones_like(texp).to(dtype=default_dtype)
-        drdt = torch.zeros_like(rexp).to(dtype=default_dtype)
+        # Tangent vectors for JVP (float32 to match)
+        dtdt = torch.ones_like(texp)
+        drdt = torch.zeros_like(rexp)
 
         # Diagnostic logging before JVP
         if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
             logger.info(f"[JVP INPUTS] z.dtype={z.dtype}, texp.dtype={texp.dtype}, v.dtype={v.dtype}")
 
         # Compute u and du/dt using JVP
-        # Monkey-patch nn.Linear to cast weights to input dtype during JVP,
-        # because torch.func.jvp dual tensors' .to(dtype) only casts the primal,
-        # not the tangent — so we cast weights (regular tensors) instead.
+        # Monkey-patch nn.Linear and RmsNorm to cast weights to input dtype
+        # during JVP, because torch.func.jvp dual tensors' .to(dtype) only
+        # casts the primal, not the tangent — so we cast weights instead.
         _orig_linear_forward = nn.Linear.forward
+        _orig_rmsnorm_forward = RmsNorm.forward
         _linear_logged = False
 
         def _jvp_safe_linear_forward(self, input):
@@ -561,8 +568,12 @@ class MeanFlowerVLA(nn.Module):
                 self.bias.to(input.dtype) if self.bias is not None else None,
             )
 
+        def _jvp_safe_rmsnorm_forward(self, x):
+            return F.rms_norm(x, self.normalized_shape, self.weight.to(x.dtype), self.eps)
+
         with torch.amp.autocast("cuda", enabled=False):
             nn.Linear.forward = _jvp_safe_linear_forward
+            RmsNorm.forward = _jvp_safe_rmsnorm_forward
             try:
                 u_pred, dudt = torch.func.jvp(
                     u_func,
@@ -571,6 +582,7 @@ class MeanFlowerVLA(nn.Module):
                 )
             finally:
                 nn.Linear.forward = _orig_linear_forward
+                RmsNorm.forward = _orig_rmsnorm_forward
 
             # u_tgt = v - h * du/dt
             h = (texp - rexp).clamp(min=0.0, max=1.0)
@@ -837,15 +849,15 @@ class MeanFlowerVLA(nn.Module):
             cond_dict: Conditioning dictionary
         """
         B, t_seq, d = z.shape
-        dtype = next(self.parameters()).dtype
+        working_dtype = z.dtype  # float32 during JVP, bf16 during inference
         if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
             logger.info(f"[DIT_FWD] z.dtype={z.dtype}, t.dtype={t.dtype}, h.dtype={h.dtype}")
-        # Extract and process conditioning inputs
-        cond = self.cond_linear(self.cond_norm(cond_dict['features'].to(dtype)))
-        freq_embeds = cond_dict['frequency_embeds'].squeeze(1).to(dtype)
+        # Extract and process conditioning inputs — cast to working_dtype
+        cond = self.cond_linear(self.cond_norm(cond_dict['features'].to(working_dtype)))
+        freq_embeds = cond_dict['frequency_embeds'].squeeze(1).to(working_dtype)
         action_type = cond_dict['action_type'].to(self.device)
-        proprio = cond_dict.get('proprio', torch.zeros_like(freq_embeds)).to(dtype) if self.use_proprio else torch.zeros_like(freq_embeds)
-        proprio_embeds = self.encode_proprio(proprio, action_type, freq_embeds.shape).to(dtype)
+        proprio = cond_dict.get('proprio', torch.zeros_like(freq_embeds)).to(working_dtype) if self.use_proprio else torch.zeros_like(freq_embeds)
+        proprio_embeds = self.encode_proprio(proprio, action_type, freq_embeds.shape).to(working_dtype)
 
         # Encode actions and positional information
         z, valid_dims = self.encode_actions(z, action_type)
@@ -854,7 +866,7 @@ class MeanFlowerVLA(nn.Module):
 
         # Apply CFG dropout on freq_embeds and proprio_embeds only
         if self.training and self.cfg_dropout > 0:
-            drop_mask = (torch.rand(freq_embeds.size(0), device=freq_embeds.device) < self.cfg_dropout).to(dtype=dtype).unsqueeze(1)
+            drop_mask = (torch.rand(freq_embeds.size(0), device=freq_embeds.device) < self.cfg_dropout).to(dtype=working_dtype).unsqueeze(1)
             freq_embeds = freq_embeds * (1 - drop_mask)
             proprio_embeds = proprio_embeds * (1 - drop_mask)
 
@@ -888,16 +900,15 @@ class MeanFlowerVLA(nn.Module):
         Returns a tensor with shape [batch, dit_dim].
         """
         batch_size, _ = output_shape
-        dtype = next(self.parameters()).dtype
-        
+
         if not self.use_proprio:
-            return torch.zeros(batch_size, self.dit_dim, device=self.device, dtype=dtype)
-        
-        encoded = torch.zeros(batch_size, self.dit_dim, device=self.device, dtype=dtype)
+            return torch.zeros(batch_size, self.dit_dim, device=self.device, dtype=proprio.dtype)
+
+        encoded = torch.zeros(batch_size, self.dit_dim, device=self.device, dtype=proprio.dtype)
         for action_name, action_idx in self.action_space_index.action_spaces.items():
             mask = (action_type == action_idx)
             if mask.any():
-                encoded[mask] = self.proprio_encoders[action_name](proprio[mask]).squeeze(1).to(dtype)
+                encoded[mask] = self.proprio_encoders[action_name](proprio[mask]).squeeze(1)
         
         return encoded
 
