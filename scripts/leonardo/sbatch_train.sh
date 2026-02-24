@@ -132,4 +132,6 @@ python -m accelerate.commands.launch --num_processes 4 \
     datamodule.datasets.DATA_PATH="${DATA_DIR}" \
     log_dir="${OUTPUT_DIR}" \
     wandb.entity=null \
-    wandb.mode=offline
+    wandb.mode=offline \
+    continue_training=/leonardo_scratch/fast/AIFAC_P01_047/project/output/checkpoints/runs/2026-02-24/10-49-10/checkpoint_20000 \
+    step=20000
