@@ -336,7 +336,9 @@ class AccelerateTrainer:
 
                 # Logging
                 if step % 1000 == 0 and self.accelerator.is_main_process:
-                    log.info(f"Step {self.global_step}: Mean batch loss MSE is {batch_loss}")
+                    losses_info = self.agent.module.agent.losses_dict
+                    v_loss = losses_info.get("v_loss", float("nan"))
+                    log.info(f"Step {self.global_step}: adaptive_loss={batch_loss:.6f}, v_loss={v_loss:.6f}")
 
                 if step % 100 == 0 and wandb.run is not None and self.accelerator.is_main_process:
                     # Get metrics from agent
