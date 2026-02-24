@@ -479,13 +479,6 @@ class TimestepEmbedder(nn.Module):
     # @torch.compile()
     def forward(self, t):
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
-        if not getattr(self, '_logged', False):
-            import torch.distributed as dist
-            import logging
-            _logger = logging.getLogger(__name__)
-            if dist.is_initialized() and dist.get_rank() == 0:
-                _logger.info(f"[T_EMBED] t.dtype={t.dtype}, t_freq.dtype={t_freq.dtype}")
-            self._logged = True
         t_emb = self.mlp(t_freq)
         return t_emb
     

@@ -449,8 +449,6 @@ class MeanFlowerVLA(nn.Module):
         B = z.shape[0]
         encoded = torch.zeros(B, z.shape[1], self.dit_dim, device=self.device, dtype=z.dtype)
         valid_dims = torch.zeros_like(z)
-        if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
-            logger.info(f"[ENC_ACT] z.dtype={z.dtype}, encoded.dtype={encoded.dtype}")
         for action_name, action_idx in self.action_space_index.action_spaces.items():
             mask = (action_type == action_idx)
             if mask.any():
@@ -545,23 +543,14 @@ class MeanFlowerVLA(nn.Module):
         dtdt = torch.ones_like(texp)
         drdt = torch.zeros_like(rexp)
 
-        # Diagnostic logging before JVP
-        if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
-            logger.info(f"[JVP INPUTS] z.dtype={z.dtype}, texp.dtype={texp.dtype}, v.dtype={v.dtype}")
-
         # Compute u and du/dt using JVP
         # Monkey-patch nn.Linear and RmsNorm to cast weights to input dtype
         # during JVP, because torch.func.jvp dual tensors' .to(dtype) only
         # casts the primal, not the tangent — so we cast weights instead.
         _orig_linear_forward = nn.Linear.forward
         _orig_rmsnorm_forward = RmsNorm.forward
-        _linear_logged = False
 
         def _jvp_safe_linear_forward(self, input):
-            nonlocal _linear_logged
-            if not _linear_logged and torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
-                logger.info(f"[JVP LINEAR] input.dtype={input.dtype}, weight.dtype={self.weight.dtype}, weight_cast={input.dtype}")
-                _linear_logged = True
             return F.linear(
                 input,
                 self.weight.to(input.dtype),
@@ -850,8 +839,6 @@ class MeanFlowerVLA(nn.Module):
         """
         B, t_seq, d = z.shape
         working_dtype = z.dtype  # float32 during JVP, bf16 during inference
-        if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
-            logger.info(f"[DIT_FWD] z.dtype={z.dtype}, t.dtype={t.dtype}, h.dtype={h.dtype}")
         # Extract and process conditioning inputs — cast to working_dtype
         cond = self.cond_linear(self.cond_norm(cond_dict['features'].to(working_dtype)))
         freq_embeds = cond_dict['frequency_embeds'].squeeze(1).to(working_dtype)
@@ -872,8 +859,6 @@ class MeanFlowerVLA(nn.Module):
 
         # Compute temporal embedding
         t_emb = sum(map(stateless_norm, [self.t_embedder(t), freq_embeds, proprio_embeds]))
-        if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
-            logger.info(f"[DIT_FWD] t_emb.dtype={t_emb.dtype}, freq_embeds.dtype={freq_embeds.dtype}")
 
         # Compute global conditioning
         if self.use_adaln_cond:
