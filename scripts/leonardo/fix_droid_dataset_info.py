@@ -46,7 +46,7 @@ def fix_dataset_info(dataset_info_path: Path) -> None:
 
     shard_lengths = train_split["shardLengths"]
     original_num_shards = len(shard_lengths)
-    original_num_bytes = int(train_split["statistics"]["numBytes"])
+    original_num_bytes = int(train_split["numBytes"])
 
     if original_num_shards <= NUM_AVAILABLE_SHARDS:
         print(
@@ -64,12 +64,7 @@ def fix_dataset_info(dataset_info_path: Path) -> None:
     new_num_bytes = int(original_num_bytes * ratio)
 
     train_split["shardLengths"] = truncated_shard_lengths
-    train_split["statistics"]["numBytes"] = str(new_num_bytes)
-    train_split["statistics"]["numExamples"] = str(truncated_num_examples)
-
-    # Also update top-level numBytes if present
-    if "numBytes" in train_split:
-        train_split["numBytes"] = str(new_num_bytes)
+    train_split["numBytes"] = str(new_num_bytes)
 
     with open(dataset_info_path, "w") as f:
         json.dump(info, f, indent=2)
