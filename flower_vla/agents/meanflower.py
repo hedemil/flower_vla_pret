@@ -445,11 +445,12 @@ class MeanFlowerVLA(nn.Module):
             - Encoded actions (latent representations).
             - A valid dimensions mask.
         """
-        default_dtype = next(self.parameters()).dtype
         action_type = action_type.to(self.device)
         B = z.shape[0]
-        encoded = torch.zeros(B, z.shape[1], self.dit_dim, device=self.device, dtype=default_dtype)
-        valid_dims = torch.zeros_like(z, dtype=default_dtype)
+        encoded = torch.zeros(B, z.shape[1], self.dit_dim, device=self.device, dtype=z.dtype)
+        valid_dims = torch.zeros_like(z)
+        if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
+            logger.info(f"[ENC_ACT] z.dtype={z.dtype}, encoded.dtype={encoded.dtype}")
         for action_name, action_idx in self.action_space_index.action_spaces.items():
             mask = (action_type == action_idx)
             if mask.any():
@@ -472,11 +473,9 @@ class MeanFlowerVLA(nn.Module):
             action_type: Action type indices [B] or broadcastable.
             valid_dims: Valid dimensions mask [B, T, action_dim].
         """
-        default_dtype = next(self.parameters()).dtype
-        h = h.to(dtype=default_dtype)
         B = z.shape[0]
         max_action_dim = self.action_dim
-        decoded = torch.zeros(B, z.shape[1], max_action_dim, device=self.device, dtype=default_dtype)
+        decoded = torch.zeros(B, z.shape[1], max_action_dim, device=self.device, dtype=z.dtype)
         for action_name, action_idx in self.action_space_index.action_spaces.items():
             mask = (action_type == action_idx)
             if mask.any():
@@ -540,13 +539,22 @@ class MeanFlowerVLA(nn.Module):
         dtdt = torch.ones_like(texp).to(dtype=default_dtype)
         drdt = torch.zeros_like(rexp).to(dtype=default_dtype)
 
+        # Diagnostic logging before JVP
+        if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
+            logger.info(f"[JVP INPUTS] z.dtype={z.dtype}, texp.dtype={texp.dtype}, v.dtype={v.dtype}")
+
         # Compute u and du/dt using JVP
         # Monkey-patch nn.Linear to cast weights to input dtype during JVP,
         # because torch.func.jvp dual tensors' .to(dtype) only casts the primal,
         # not the tangent — so we cast weights (regular tensors) instead.
         _orig_linear_forward = nn.Linear.forward
+        _linear_logged = False
 
         def _jvp_safe_linear_forward(self, input):
+            nonlocal _linear_logged
+            if not _linear_logged and torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
+                logger.info(f"[JVP LINEAR] input.dtype={input.dtype}, weight.dtype={self.weight.dtype}, weight_cast={input.dtype}")
+                _linear_logged = True
             return F.linear(
                 input,
                 self.weight.to(input.dtype),
@@ -710,8 +718,10 @@ class MeanFlowerVLA(nn.Module):
         
         # MeanFlow: single-step sampling
         # z_0 = z_1 - u(z_1, t=1, h=1)
-        t_tensor = torch.ones(b, device=device)
-        h_tensor = torch.ones(b, device=device)
+        dtype = next(self.parameters()).dtype
+        z = z.to(dtype=dtype)
+        t_tensor = torch.ones(b, device=device, dtype=dtype)
+        h_tensor = torch.ones(b, device=device, dtype=dtype)
         u = self.dit_forward_meanflow(z, t_tensor, h_tensor, cond)
         z = z - u
 
@@ -828,10 +838,8 @@ class MeanFlowerVLA(nn.Module):
         """
         B, t_seq, d = z.shape
         dtype = next(self.parameters()).dtype
-        # Ensure all inputs are in model dtype (critical inside no-autocast JVP block)
-        z = z.to(dtype=dtype)
-        t = t.to(dtype=dtype)
-        h = h.to(dtype=dtype)
+        if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
+            logger.info(f"[DIT_FWD] z.dtype={z.dtype}, t.dtype={t.dtype}, h.dtype={h.dtype}")
         # Extract and process conditioning inputs
         cond = self.cond_linear(self.cond_norm(cond_dict['features'].to(dtype)))
         freq_embeds = cond_dict['frequency_embeds'].squeeze(1).to(dtype)
@@ -852,6 +860,8 @@ class MeanFlowerVLA(nn.Module):
 
         # Compute temporal embedding
         t_emb = sum(map(stateless_norm, [self.t_embedder(t), freq_embeds, proprio_embeds]))
+        if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
+            logger.info(f"[DIT_FWD] t_emb.dtype={t_emb.dtype}, freq_embeds.dtype={freq_embeds.dtype}")
 
         # Compute global conditioning
         if self.use_adaln_cond:
@@ -896,11 +906,10 @@ class MeanFlowerVLA(nn.Module):
         Computes action-specific AdaLN modulation signals.
         Returns a list of modulation tensors.
         """
-        dtype = next(self.parameters()).dtype
         batch_size = global_cond.shape[0]
         num_chunks = 9 if self.use_cross_attn else 6
-        
-        mod_signals = [torch.zeros(batch_size, self.dit_dim, device=self.device, dtype=dtype) for _ in range(num_chunks)]
+
+        mod_signals = [torch.zeros(batch_size, self.dit_dim, device=self.device, dtype=global_cond.dtype) for _ in range(num_chunks)]
         
         for action_idx in range(len(self.action_space_index.action_spaces)):
             mask = (action_type == action_idx)
