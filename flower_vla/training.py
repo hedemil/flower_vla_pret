@@ -166,8 +166,8 @@ def main(cfg: DictConfig) -> None:
                 try:
                     step = cfg.get("step", 0)
                     accelerator.load_state(cfg.continue_training)
-                    # trainer.continue_training(cfg.continue_training, "custom_checkpoint_0.pkl", step)
-                    log.info("Successfully loaded checkpoint")
+                    trainer.global_step = step
+                    log.info(f"Successfully loaded checkpoint, resuming from step {step}")
                 except Exception as e:
                     log.error(f"Failed to load checkpoint: {e}")
                     raise e
