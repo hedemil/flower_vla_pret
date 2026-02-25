@@ -2,7 +2,7 @@ defaults:
   - datamodule: oxe_data # uha_data
   - trainer: meanflower_trainer # meanflower_trainer # flower_trainer # baseline_trainer mode_trainer
 
-DATA_NAME: cross_x_no_kit # cross_x # simpler_env #real_kitchen_droid_co_training
+DATA_NAME: flower_eef_mix # cross_x_no_kit # cross_x # simpler_env #real_kitchen_droid_co_training
 
 wandb:
   name: uha_${now:%H-%M-%S}_flower # uha
@@ -49,7 +49,7 @@ act_seq_len: 16
 max_train_steps: 800000 # 100000 # 31000 # 23000 # 50000
 max_eval_steps: 100 #0 #00 #250 # 50
 eval_every_n_steps: 10000 #00 #000 # 2000
-save_every_n_steps: 20000 # 4000 # 2000 # 10000
+save_every_n_steps: 10000 # 4000 # 2000 # 10000
 shuffle_buffer_size: 500000 # 1000 # 250000 # high influence on the consumed memory, but has to be big for IID to hold. Octo recommends >100k for large scale training (~1% of accumulated sample sized used in Octo)
 batch_size: 600 # 1024 # 2048 # 128 # single GPU batchsize is automatically reduced in multi-GPU training: cfg.batch_size = cfg.batch_size / torch.cuda.device_count()
 dataset_size_limit: null # null # 1000 # limits all datasets to the provided amount of trajectories

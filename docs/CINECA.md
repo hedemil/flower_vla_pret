@@ -39,3 +39,6 @@ bash $LEONARDO_FAST/project/flower_vla_pret/scripts/leonardo/sync_wandb.sh
 ```
 
 
+```bash
+
+```

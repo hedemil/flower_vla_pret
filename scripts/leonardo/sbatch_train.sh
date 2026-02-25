@@ -131,7 +131,6 @@ python -m accelerate.commands.launch --num_processes 4 \
     flower_vla/training.py \
     datamodule.datasets.DATA_PATH="${DATA_DIR}" \
     log_dir="${OUTPUT_DIR}" \
+    wandb.name=meanflower_${SLURM_JOB_ID}_flower_eef_mix \
     wandb.entity=null \
     wandb.mode=offline \
-    +continue_training=/leonardo_scratch/fast/AIFAC_P01_047/project/output/checkpoints/runs/2026-02-24/10-49-10/checkpoint_20000 \
-    +step=20000

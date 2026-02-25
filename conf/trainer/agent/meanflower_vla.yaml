@@ -15,7 +15,7 @@ agent:
   img_modalities: ${img_modalities}
   lang_modalities: ${lang_modalities}
   target_modality: ${target_modality}
-  vlm_path: microsoft/Florence-2-base
+  vlm_path: microsoft/Florence-2-base # microsoft/Florence-2-large
   freeze_florence: False
   freeze_vision_tower: False
   freeze_embeddings_only: True
