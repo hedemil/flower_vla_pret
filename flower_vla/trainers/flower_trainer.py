@@ -1,6 +1,7 @@
 import os
+import gc
 import logging
-import copy 
+import copy
 from collections import OrderedDict
 import traceback
 
@@ -336,6 +337,7 @@ class AccelerateTrainer:
 
                 # Logging
                 if step % 1000 == 0 and self.accelerator.is_main_process:
+                    gc.collect()
                     losses_info = self.agent.module.agent.losses_dict
                     v_loss = losses_info.get("v_loss", float("nan"))
                     log.info(f"Step {self.global_step}: adaptive_loss={batch_loss:.6f}, v_loss={v_loss:.6f}")

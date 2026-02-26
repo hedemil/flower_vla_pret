@@ -48,7 +48,7 @@ class TorchRLDSIterableDataset(torch.utils.data.IterableDataset):
         self.tracker = SampleTracker(enable_tracking)
 
     def __iter__(self):
-        for idx, sample in enumerate(self._rlds_dataset.iterator(prefetch=128)):
+        for idx, sample in enumerate(self._rlds_dataset.iterator(prefetch=16)):
             # Track sample if enabled
             if self.tracker.enable_tracking and "dataset_name" in sample:
                 dataset_name = sample["dataset_name"][0].decode() if isinstance(sample["dataset_name"], np.ndarray) else sample["dataset_name"]

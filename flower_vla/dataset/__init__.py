@@ -25,7 +25,7 @@ def make_pytorch_oxe_iterable_dataset(dataset, language_encoder=None, train=True
     }
     
     if main_process:
-        loader_kwargs['prefetch_factor'] = 8
+        loader_kwargs['prefetch_factor'] = 2
         
     return DataLoader(torch_iterable, **loader_kwargs)
 
