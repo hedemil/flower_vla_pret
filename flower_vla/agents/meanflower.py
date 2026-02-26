@@ -87,6 +87,7 @@ class MeanFlowerVLA(nn.Module):
         P_mean: float = -0.4,
         P_std: float = 1.0,
         data_proportion: float = 1.0,
+        apply_guidance: bool = False,
     ):
         """
         Initializes the MeanFlowerVLA agent that combines a pretrained vision–language model
@@ -155,6 +156,7 @@ class MeanFlowerVLA(nn.Module):
             "P_std",
             torch.tensor(P_std, dtype=torch.float32)
         )
+        self.apply_guidance = apply_guidance
 
         logger.info("VLM and DiT components set up.")
 
@@ -524,6 +526,8 @@ class MeanFlowerVLA(nn.Module):
         z = (1 - texp) * actions + texp * e
         v = e - actions  # target velocity
 
+        v_g = self.apply_guidance(v, z, texp, cond) if self.apply_guidance else v
+
         # Cast to float32 for JVP — dual tensors must have matching dtype
         # throughout. RmsNorm's JVP promotes tangents to float32, so if primals
         # are bf16 we get mixed-dtype duals that crash F.linear.
@@ -724,9 +728,43 @@ class MeanFlowerVLA(nn.Module):
         t_tensor = torch.ones(b, device=device, dtype=dtype)
         h_tensor = torch.ones(b, device=device, dtype=dtype)
         u = self.dit_forward_meanflow(z, t_tensor, h_tensor, cond)
+
+        # # Only apply CFG during inference
+        # apply_cfg = inference and self.cfg_lambda != 1.0
+        
+        # # Create null conditioning once outside the loop
+        # if apply_cfg:
+        #     # Create a deep copy of the conditioning dictionary
+        #     null_cond = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in cond.items()}
+            
+        #     # Clone features to avoid modifying original
+        #     features = null_cond['features'].clone()
+            
+        #     # Calculate where text features begin based on your encode_observations method
+        #     prompt_length = self.prompt_embeds.shape[1]
+        #     image_length = 50 if self.use_second_view is False else 100
+            
+        #     # Zero out only the text portion (after prompt and image features)
+        #     text_start = prompt_length + image_length
+        #     features[:, text_start:, :] = 0.0
+            
+        #     # Update features in null_cond
+        #     null_cond['features'] = features
+        
+        # # Apply CFG if needed
+        # if apply_cfg:
+        #     u_cfg = self.dit_forward_meanflow(z, t_tensor, h_tensor, null_cond)
+        #     u = u_cfg + self.cfg_lambda * (u - u_cfg)
+
         z = z - u
 
         return z.clamp(-1, 1)
+    
+    def apply_guidance_fn(self, u: torch.Tensor, z: torch.Tensor, guidance: torch.Tensor,) -> torch.Tensor:
+        """
+        Applies guidance to the action update.
+        """
+        pass
 
     # === Forward Pass and Rollout Methods ===
     def forward(self, obs: Dict, goal: Dict) -> torch.Tensor:
