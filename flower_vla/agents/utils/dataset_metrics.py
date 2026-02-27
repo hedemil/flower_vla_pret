@@ -17,8 +17,9 @@ class DatasetMetricsTracker:
     def update(self, losses: torch.Tensor, dataset_indices: torch.Tensor):
         if losses.shape != dataset_indices.shape:
             losses = losses.expand_as(dataset_indices)
-        self.stored_data['losses'].append(losses.detach())
-        self.stored_data['indices'].append(dataset_indices.detach())
+        # Store on CPU to avoid GPU memory accumulation across eval steps
+        self.stored_data['losses'].append(losses.detach().cpu())
+        self.stored_data['indices'].append(dataset_indices.detach().cpu())
     
     def compute_metrics(self):
         metrics = {}

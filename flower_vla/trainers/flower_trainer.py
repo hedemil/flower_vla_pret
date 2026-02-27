@@ -336,8 +336,10 @@ class AccelerateTrainer:
                 batch_loss = self.train_step(batch)
 
                 # Logging
-                if step % 1000 == 0 and self.accelerator.is_main_process:
+                if step % 1000 == 0:
                     gc.collect()
+                    torch.cuda.empty_cache()
+                if step % 1000 == 0 and self.accelerator.is_main_process:
                     losses_info = self.agent.module.agent.losses_dict
                     v_loss = losses_info.get("v_loss", float("nan"))
                     log.info(f"Step {self.global_step}: adaptive_loss={batch_loss:.6f}, v_loss={v_loss:.6f}")
@@ -534,7 +536,7 @@ class AccelerateTrainer:
             
     def evaluate(self, generator, best_test_mse):
         test_losses = []
-        
+
         for step in range(self.max_eval_steps):
             try:
                 batch = next(generator)
@@ -546,17 +548,20 @@ class AccelerateTrainer:
             eval_loss = eval_dict['loss'].mean().item() if torch.is_tensor(eval_dict['loss']) else eval_dict['loss']
             test_losses.append(eval_loss)
 
+            # Move to CPU before tracking to avoid GPU memory accumulation
             self.metrics_tracker.update(
-                losses=eval_dict['loss'],
-                dataset_indices=eval_dict['dataset_index']
+                losses=eval_dict['loss'].detach().cpu(),
+                dataset_indices=eval_dict['dataset_index'].detach().cpu()
             )
+            # Explicitly delete large tensors we don't need
+            del eval_dict
 
         # Gather and average losses
         gathered_losses = self.accelerator.gather(torch.tensor(test_losses, device=self.accelerator.device))
         avg_test_mse = float(gathered_losses.mean().item())
-        
+
         self.accelerator.wait_for_everyone()
-        
+
         if self.accelerator.is_main_process:
             log.info(f"Step {self.global_step}: Mean test MSE is {avg_test_mse}")
             if avg_test_mse < best_test_mse:
@@ -564,6 +569,10 @@ class AccelerateTrainer:
                 log.info('New best test loss!')
 
         self.compute_and_log_metrics()
+
+        # Free GPU memory after evaluation
+        torch.cuda.empty_cache()
+
         return avg_test_mse, best_test_mse
 
     def load_pretrained_model(self, weights_path: str, ema_name: str = None) -> None:

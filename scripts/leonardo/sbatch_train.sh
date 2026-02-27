@@ -134,5 +134,5 @@ python -m accelerate.commands.launch --num_processes 4 \
     wandb.name=meanflower_${SLURM_JOB_ID}_flower_eef_mix \
     wandb.entity=null \
     wandb.mode=offline \
-    +continue_training=/leonardo_scratch/fast/AIFAC_P01_047/project/output/checkpoints/runs/2026-02-26/09-40-36/checkpoint_10000 \
-    +step=10000
+    +continue_training=/leonardo_scratch/fast/AIFAC_P01_047/project/output/checkpoints/runs/2026-02-27/09-40-45/checkpoint_20000 \
+    +step=20000

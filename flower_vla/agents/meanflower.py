@@ -818,13 +818,11 @@ class MeanFlowerVLA(nn.Module):
                     losses_dict[f"val_loss_{action_name}"] = space_loss.item()
                     total_loss += space_loss
                     num_action_types += 1
-            avg_loss = total_loss 
+            avg_loss = total_loss
             return {
-                "loss": avg_loss,
+                "loss": avg_loss.detach(),
                 "losses": losses_dict,
-                "predictions": action_pred,
-                "targets": batch[self.target_modality],
-                "dataset_index": batch['task'].get('dataset_index', torch.zeros(action_pred.shape[0], device=self.device))
+                "dataset_index": batch['task'].get('dataset_index', torch.zeros(action_pred.shape[0], device=self.device)).detach()
             }
 
     def dit_forward_meanflow(self, z: torch.Tensor, t: torch.Tensor, h: torch.Tensor, cond_dict: dict) -> torch.Tensor:

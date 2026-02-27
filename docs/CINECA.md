@@ -12,7 +12,7 @@ ssh ehed0000@login.leonardo.cineca.it
 ```bash
 tmux new -s train
 source $LEONARDO_WORK/project/venvs/flowervla/bin/activate
-
+cd $LEONARDO_FAST/project/flower_vla_pret
 # Debug
 sbatch $LEONARDO_FAST/project/flower_vla_pret/scripts/leonardo/sbatch_debug.sh
 # Train
@@ -39,6 +39,11 @@ bash $LEONARDO_FAST/project/flower_vla_pret/scripts/leonardo/sync_wandb.sh
 ```
 
 
+# Download checkpoint
 ```bash
+# Checkpoint
+rsync -avP leonardo:/leonardo_scratch/fast/AIFAC_P01_047/project/output/checkpoints/runs/2026-02-27/09-40-45/checkpoint_20000 ./
 
+# Hydra
+rsync -avP leonardo:/leonardo_scratch/fast/AIFAC_P01_047/project/output/checkpoints/runs/2026-02-27/09-40-45/.hydra ./
 ```

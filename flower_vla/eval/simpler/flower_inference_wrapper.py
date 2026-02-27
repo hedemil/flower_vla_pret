@@ -82,9 +82,8 @@ class UhaInference:
         self.use_ema = use_ema
         self.use_dopri5 = use_dopri5
         # ------------------------- #
-        model_path_split = saved_model_path.split("/")
-        weights_path = os.path.join(saved_model_base_dir, model_path_split[0])
-        checkpoint_path = os.path.join(weights_path, model_path_split[1])
+        weights_path = os.path.join(saved_model_base_dir, os.path.dirname(saved_model_path))
+        checkpoint_path = os.path.join(saved_model_base_dir, saved_model_path)
         file_path = os.path.dirname(os.path.abspath(__file__))
         weights_path_relative = os.path.relpath(weights_path, file_path)
         with initialize(config_path=os.path.join(weights_path_relative, ".hydra")):
