@@ -18,13 +18,13 @@ def make_pytorch_oxe_iterable_dataset(dataset, language_encoder=None, train=True
     
     loader_kwargs = {
         'batch_size': batch_size,
-        'num_workers': 2 if main_process else 0, # 2 for kcist 1 for horeka 
+        'num_workers': num_workers,
         'pin_memory': pin_memory,
         'drop_last': drop_last,
         'shuffle': False if is_single_dataset else None
     }
     
-    if main_process:
+    if num_workers > 0:
         loader_kwargs['prefetch_factor'] = 2
         
     return DataLoader(torch_iterable, **loader_kwargs)
