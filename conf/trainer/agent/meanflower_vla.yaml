@@ -34,11 +34,11 @@ agent:
   # flow configuration
   action_type_adaln: True
   dit_dim: 1024
-  n_heads: 8
-  n_layers: 12
-  attn_pdrop: 0.3
-  resid_pdrop: 0.1
-  mlp_pdrop: 0.1
+  n_heads: 16
+  n_layers: 18
+  attn_pdrop: 0.0
+  resid_pdrop: 0.0
+  mlp_pdrop: 0.0
   use_cross_attn: True
   use_adaln_cond: False
   use_rope: True

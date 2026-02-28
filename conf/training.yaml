@@ -18,7 +18,7 @@ seed: 42
 obs_dim: 16 
 goal_dim: 512
 update_ema_every_n_steps: 1
-decay: 0.999
+decay: 0.9999
 rampup_ratio: 0.001 # 1-decay
 
 # dataloader
