@@ -117,8 +117,12 @@ def main(cfg: DictConfig) -> None:
             
             # Scale learning rate parameters
             if 'dit_lr_scheduler' in cfg.trainer:
-                cfg.trainer.dit_lr_scheduler.num_warmup_steps *= device_count
-                cfg.trainer.dit_lr_scheduler.timescale *= device_count
+                if 'num_warmup_steps' in cfg.trainer.dit_lr_scheduler:
+                    cfg.trainer.dit_lr_scheduler.num_warmup_steps *= device_count
+                if 'timescale' in cfg.trainer.dit_lr_scheduler:
+                    cfg.trainer.dit_lr_scheduler.timescale *= device_count
+                if 'total_steps' in cfg.trainer.dit_lr_scheduler:
+                    cfg.trainer.dit_lr_scheduler.total_steps *= device_count
             if 'vlm_lr_scheduler' in cfg.trainer:
                 cfg.trainer.vlm_lr_scheduler.total_steps *= device_count
             if 'lr_scheduler' in cfg.trainer:

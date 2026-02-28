@@ -34,8 +34,10 @@ cat flowervla_*.err
 ```bash
 source $LEONARDO_WORK/project/venvs/flowervla/bin/activate
 wandb login
-export LEONARDO_FAST=/leonardo_scratch/fast/AIFAC_P01_047
 bash $LEONARDO_FAST/project/flower_vla_pret/scripts/leonardo/sync_wandb.sh
+
+# Delete logs after sync
+rm -rf "${LEONARDO_FAST}/project/output/wandb_runs/wandb/"
 ```
 
 
