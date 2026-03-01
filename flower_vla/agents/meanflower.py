@@ -592,16 +592,15 @@ class MeanFlowerVLA(nn.Module):
             diff = diff * valid_mask.to(dtype=default_dtype)
             loss_per_sample = (diff ** 2).sum(dim=(1, 2))
 
-            # Use raw MSE for the first 10k steps to establish a baseline
-            # velocity field before enabling adaptive weighting. The adaptive
-            # normalization forces loss ≈ 1.0 regardless of error magnitude,
-            # which masks gradient signal early in training.
-            adaptive_warmup_steps = 10000
-            if self._train_step > adaptive_warmup_steps:
-                norm_eps = 0.01
-                norm_p = 1.0
-                adp_wt = (loss_per_sample.detach() + norm_eps) ** norm_p
-                loss_per_sample = loss_per_sample / adp_wt
+            # Adaptive weighting: normalizes loss to ~1.0 per sample.
+            # This is critical for MeanFlow stability — without it, the
+            # self-referential target u_tgt = v - h*du/dt creates a positive
+            # feedback loop where large du/dt → large loss → large gradients
+            # → even larger du/dt, causing divergence.
+            norm_eps = 0.01
+            norm_p = 1.0
+            adp_wt = (loss_per_sample.detach() + norm_eps) ** norm_p
+            loss_per_sample = loss_per_sample / adp_wt
 
             loss = loss_per_sample.mean()
 

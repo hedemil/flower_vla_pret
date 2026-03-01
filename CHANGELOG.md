@@ -64,8 +64,17 @@
 
 | Change | File | Rationale |
 |--------|------|-----------|
-| Log `dudt_norm` metric | `meanflower.py`, `flower_trainer.py` | Diagnose whether `du/dt` is vanishing — the key indicator that the model is degenerating to standard flow. |
-| Disable adaptive weighting for first 10k steps | `meanflower.py` | Use raw MSE to establish a baseline velocity field with full gradient magnitude before switching to adaptive normalization. |
-| Add `_train_step` counter | `meanflower.py` | Track training step for the adaptive loss warmup. |
+| Log `dudt_norm` metric | `meanflower.py`, `flower_trainer.py` | Diagnose whether `du/dt` is vanishing or exploding. |
+| Add `_train_step` counter | `meanflower.py` | Internal step tracking. |
 
 **Files changed**: `conf/trainer/agent/meanflower_vla.yaml`, `conf/trainer/meanflower_trainer.yaml`, `conf/training.yaml`, `flower_vla/agents/meanflower.py`, `flower_vla/trainers/flower_trainer.py`
+
+## [2026-03-01] Revert adaptive loss warmup — du/dt is exploding, not vanishing
+
+**Problem**: After disabling adaptive weighting for the first 10k steps (raw MSE), `dudt_norm` exploded from 439 (step 1) to 13,354 (step 2k), and the loss diverged from 167 to 21,149.
+
+**Finding**: The hypothesis that `du/dt` was vanishing (causing the model to degenerate to standard flow) was **wrong**. The actual dynamic is the opposite: without adaptive normalization, MeanFlow's self-referential target creates a positive feedback loop: large `du/dt` → large `u_tgt = v - h * du/dt` → huge MSE → huge gradients → even larger `du/dt`. The adaptive weighting `loss / (loss + eps)^p ≈ 1.0` is a necessary stabilizer that caps the effective gradient, preventing this runaway. It is not merely a convenience — it is critical for MeanFlow convergence.
+
+**Fix**: Reverted: adaptive weighting is now active from step 0 (as in the MeanFlow paper). The `dudt_norm` logging remains to monitor the derivative magnitude going forward.
+
+**Files changed**: `flower_vla/agents/meanflower.py`
