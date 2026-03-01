@@ -33,9 +33,9 @@ agent:
   use_proprio: True
   # flow configuration
   action_type_adaln: True
-  dit_dim: 1024
-  n_heads: 16
-  n_layers: 18
+  dit_dim: 768
+  n_heads: 12
+  n_layers: 12
   attn_pdrop: 0.0
   resid_pdrop: 0.0
   mlp_pdrop: 0.0

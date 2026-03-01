@@ -161,6 +161,7 @@ class MeanFlowerVLA(nn.Module):
         # Initialize rollout state.
         self.rollout_step_counter = 0
         self.pred_action_seq = None
+        self._train_step = 0
 
         # Ensure that all parameters and buffers are on the correct device.
         self.ensure_device_consistency()
@@ -591,11 +592,16 @@ class MeanFlowerVLA(nn.Module):
             diff = diff * valid_mask.to(dtype=default_dtype)
             loss_per_sample = (diff ** 2).sum(dim=(1, 2))
 
-            # Adaptive weighting
-            norm_eps = 0.01
-            norm_p = 1.0
-            adp_wt = (loss_per_sample.detach() + norm_eps) ** norm_p
-            loss_per_sample = loss_per_sample / adp_wt
+            # Use raw MSE for the first 10k steps to establish a baseline
+            # velocity field before enabling adaptive weighting. The adaptive
+            # normalization forces loss ≈ 1.0 regardless of error magnitude,
+            # which masks gradient signal early in training.
+            adaptive_warmup_steps = 10000
+            if self._train_step > adaptive_warmup_steps:
+                norm_eps = 0.01
+                norm_p = 1.0
+                adp_wt = (loss_per_sample.detach() + norm_eps) ** norm_p
+                loss_per_sample = loss_per_sample / adp_wt
 
             loss = loss_per_sample.mean()
 
@@ -604,6 +610,9 @@ class MeanFlowerVLA(nn.Module):
             valid_u = u_pred[valid_mask]
             valid_v = v[valid_mask]
             v_loss = ((valid_u - valid_v) ** 2).mean()
+            # Track du/dt magnitude — if this vanishes, the model degenerates
+            # to standard flow and single-step sampling will fail.
+            dudt_norm = dudt[valid_mask].norm(dim=0).mean()
 
         # Check for NaN/Inf in outputs
         if torch.isnan(u_pred).any() or torch.isinf(u_pred).any():
@@ -627,6 +636,7 @@ class MeanFlowerVLA(nn.Module):
         losses_dict = {
             "loss": loss.item() if not (torch.isnan(loss).any() or torch.isinf(loss).any()) else 1e6,
             "v_loss": v_loss.item() if not (torch.isnan(v_loss).any() or torch.isinf(v_loss).any()) else 1e6,
+            "dudt_norm": dudt_norm.item(),
             "h_mean": h.mean().item(),
         }
 
@@ -772,6 +782,7 @@ class MeanFlowerVLA(nn.Module):
         Encodes observations, computes the appropriate flow loss, and returns the loss tensor.
         """
         self.train()
+        self._train_step += 1
         obs_features = self.encode_observations(batch)
 
         action_loss, losses_dict = self.meanflow_loss(
