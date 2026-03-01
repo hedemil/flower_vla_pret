@@ -20,3 +20,16 @@
 | VLM weight decay | 1e-9 | **0.001** | FLOWER paper Table 8. |
 
 **Files changed**: `conf/trainer/agent/meanflower_vla.yaml`, `conf/trainer/meanflower_trainer.yaml`
+
+## [2026-03-01] Fix OOM from larger DiT + EMA
+
+**Problem**: CUDA OOM on 4x A100 64GB. The larger DiT (18 layers, 16 heads) combined with EMA and `torch.func.jvp` (which doubles forward pass memory for dual numbers) exceeded 64GB per GPU.
+
+**Fix**: Halve `batch_size` and double `gradient_accumulation_steps` to preserve the same effective batch size while reducing peak activation memory.
+
+| Parameter | Before | After | Rationale |
+|-----------|--------|-------|-----------|
+| batch_size | 600 | **300** | Halved to fit in 64GB with larger DiT + EMA + JVP |
+| gradient_accumulation_steps | 2 | **4** | Doubled to keep effective batch size at 1200 |
+
+**Files changed**: `conf/training.yaml`
