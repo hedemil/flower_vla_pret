@@ -389,6 +389,9 @@ class FlowBlock(nn.Module):
             nn.Linear(dim, lora_dim),  # Down-project
             nn.Linear(lora_dim, 6 * dim)  # Up-project to produce 6 modulation signals
         )
+        # Zero-init output so gates start at 0 → each block is identity at init
+        nn.init.zeros_(self.adaLN_modulation[-1].weight)
+        nn.init.zeros_(self.adaLN_modulation[-1].bias)
 
     def forward(self, cx: torch.Tensor, c: torch.Tensor,
                 context: Optional[torch.Tensor] = None,
@@ -627,9 +630,12 @@ class MeanFlowDecoder(nn.Module):
             nn.Linear(dit_dim * 2, hidden_dim), # dit_dim (features) + dit_dim (h embedding)
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),  
+            nn.SiLU(),
             nn.Linear(hidden_dim, action_dim)
         )
+        # Zero-init final layer so u=0, v=0, dudt=0 at initialization
+        nn.init.zeros_(self.decoder[-1].weight)
+        nn.init.zeros_(self.decoder[-1].bias)
 
     def forward(self, z: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
         """

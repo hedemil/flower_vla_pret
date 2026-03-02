@@ -1,5 +1,38 @@
 # MeanFlower VLA - Changelog
 
+## [2026-03-02] Fix v-head training instability: zero-init output layers
+
+**Problem**: `dudt_norm` explodes from 450 to 6242 in 1k steps after adding v-head architecture. Compared against official iMF JAX implementation (`imfDiT.py`).
+
+**Root cause**: Missing zero-initialization from official iMF. The official code zero-inits both `FinalLayer` (u and v decoders output exactly zero at init) and residual gates in `TransformerBlock` (each block is identity at init). Our code used default PyTorch init (Kaiming/Xavier), producing large random outputs and a large random Jacobian `∂u/∂z` at step 0.
+
+**Fix**: Two zero-init changes matching the official iMF implementation:
+1. **`MeanFlowDecoder.decoder`**: Zero-init final linear layer weight and bias → `u=0`, `v=0`, `dudt=0` at initialization
+2. **`FlowBlock.adaLN_modulation`**: Zero-init output linear weight and bias → `gate_msa=0`, `gate_mlp=0`, `shift=0`, `scale=0` at init → each block is identity (since `modulate` uses `(1+scale)*x + shift`)
+
+**Expected effect**: `dudt_norm` should start near 0 at step 1 and grow gradually, instead of starting at 450 and exploding.
+
+**Files changed**: `flower_vla/agents/networks/meanflower_transformers.py`
+
+## [2026-03-02] Fix OOM from v-head blocks inside JVP
+
+**Problem**: CUDA OOM on 4x A100 64GB after adding the v-head architecture. The v-head added 8 extra DiT blocks that were unnecessarily propagated through `torch.func.jvp` as dual tensors, roughly doubling per-block memory. Additionally, `v_cond_fn` ran through all 20 blocks (including 8 unused u-head blocks) while retaining the full autograd graph despite the result being `.detach()`'d.
+
+**Root cause**: Three sources of wasted memory in the JVP + v-head computation:
+1. `u_func` used `return_v=True`, propagating dual tensors through v_head_blocks (8 blocks) even though v_pred was only auxiliary (`has_aux=True` doesn't skip computation, only discards tangents at return)
+2. `v_cond_fn` ran through u_head_blocks (8 blocks) it didn't need, since it only used the v-head output
+3. `v_cond_fn` retained the autograd computation graph (20 blocks of activations) despite the result being detached
+
+**Fix**: Restructure the forward passes to minimize memory during JVP:
+1. Added `v_only` mode to `dit_forward_meanflow` — skips u-head blocks entirely, only runs shared + v-head
+2. JVP now only runs through shared + u-head (12 blocks with dual tensors, down from 20)
+3. v_pred computed separately outside JVP via `v_only=True` (12 blocks, normal autograd)
+4. `v_cond_fn` wrapped in `torch.no_grad()` and uses `v_only=True` (12 blocks, no activations retained)
+
+**Memory reduction**: ~40% reduction in peak GPU memory during training step. Before: ~60 block-equivalents (where dual = 2x), after: ~36 block-equivalents.
+
+**Files changed**: `flower_vla/agents/meanflower.py`
+
 ## [2026-03-02] Implement Improved Mean Flow (iMF) with v-head architecture
 
 **Problem**: Training loss decreases but validation MSE degrades after ~10k steps (0.137 at 10k → 0.291 at 30k). The original MeanFlow's self-referential target `u_tgt = v - h * du/dt` causes bootstrap instability. Initial boundary-condition approach (using u-head at h=0 as v) failed — `dudt_norm` exploded from 438 to 5982 in 1k steps because the shared u-head parameters received conflicting gradients from `loss_u` and `loss_v`.
