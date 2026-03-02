@@ -50,3 +50,5 @@ agent:
   P_mean: -0.4
   P_std: 1.0
   data_proportion: 0.5 # MF uses 0.75, IMF uses 0.5
+  # iMF v-head: splits last aux_head_depth blocks into separate u-head and v-head
+  aux_head_depth: 8 # iMF default: 8 (with 12 total = 4 shared + 8 per head)

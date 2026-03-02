@@ -86,7 +86,9 @@ class MeanFlowerVLA(nn.Module):
         noise_dist: str = 'logit_normal',
         P_mean: float = -0.4,
         P_std: float = 1.0,
-        data_proportion: float = 0.5 # 1.0,
+        data_proportion: float = 0.5, # 1.0,
+        # iMF v-head configuration
+        aux_head_depth: int = 8,
     ):
         """
         Initializes the MeanFlowerVLA agent that combines a pretrained vision–language model
@@ -143,6 +145,7 @@ class MeanFlowerVLA(nn.Module):
             dit_dim, n_heads, n_layers, action_dim, act_window_size, hidden_dim,
             attn_pdrop, resid_pdrop, mlp_pdrop, use_cross_attn,
             use_rope, use_nope, query_seq_len, rope_theta,
+            aux_head_depth=aux_head_depth,
         )
         # Mean Flow specific parameters
         self.noise_dist = noise_dist
@@ -260,7 +263,8 @@ class MeanFlowerVLA(nn.Module):
         use_rope: bool,
         use_nope: bool,
         query_seq_len: int,
-        rope_theta: float
+        rope_theta: float,
+        aux_head_depth: int = 8,
     ) -> None:
         """
         Sets up DiT components for Mean Flow. Identical to _setup_dit_components
@@ -338,20 +342,47 @@ class MeanFlowerVLA(nn.Module):
                 torch.randn(1, act_window_size, dit_dim) * 0.1
             )
 
-        # Set up DiT blocks
-        self.dit = nn.ModuleList([
-            FlowBlock(
-                dim=dit_dim,
-                heads=n_heads,
-                attn_pdrop=attn_pdrop,
-                resid_pdrop=resid_pdrop,
-                mlp_pdrop=mlp_pdrop,
-                use_cross_attn=use_cross_attn,
-                use_rope=use_rope,
-                query_seq_len=query_seq_len,
-                rope_theta=rope_theta
-            ) for _ in range(n_layers)
+        # Set up DiT blocks: shared backbone + separate u-head and v-head
+        shared_depth = n_layers - aux_head_depth
+        assert shared_depth >= 0, f"aux_head_depth ({aux_head_depth}) must be <= n_layers ({n_layers})"
+        self.aux_head_depth = aux_head_depth
+
+        block_kwargs = dict(
+            dim=dit_dim,
+            heads=n_heads,
+            attn_pdrop=attn_pdrop,
+            resid_pdrop=resid_pdrop,
+            mlp_pdrop=mlp_pdrop,
+            use_cross_attn=use_cross_attn,
+            use_rope=use_rope,
+            query_seq_len=query_seq_len,
+            rope_theta=rope_theta,
+        )
+
+        self.shared_blocks = nn.ModuleList([
+            FlowBlock(**block_kwargs) for _ in range(shared_depth)
         ])
+        self.u_head_blocks = nn.ModuleList([
+            FlowBlock(**block_kwargs) for _ in range(aux_head_depth)
+        ])
+        self.v_head_blocks = nn.ModuleList([
+            FlowBlock(**block_kwargs) for _ in range(aux_head_depth)
+        ])
+
+        # v-head decoders (one per action space, like u-head)
+        self.v_action_decoders = nn.ModuleDict()
+        for action_name, action_idx in self.action_space_index.action_spaces.items():
+            input_dim = self.action_space_index.get_action_dim(action_idx)
+            self.v_action_decoders[action_name] = MeanFlowDecoder(
+                dit_dim=dit_dim,
+                action_dim=input_dim,
+                hidden_dim=dit_dim * 2
+            ).to(self.device)
+
+        # self.dit: all DiT blocks (shared + u-head + v-head) for grad clipping/EMA
+        self.dit = nn.ModuleList(
+            list(self.shared_blocks) + list(self.u_head_blocks) + list(self.v_head_blocks)
+        )
 
     def _verify_device_consistency(self) -> None:
         """Verifies that all parameters and buffers are on the expected device."""
@@ -489,6 +520,26 @@ class MeanFlowerVLA(nn.Module):
                 decoded[mask, :, :adim] = pred[..., :adim] * valid_dims[mask, :, :adim]
         return decoded
 
+    def decode_v(
+        self, z: torch.Tensor, h: torch.Tensor,
+        action_type: torch.Tensor, valid_dims: torch.Tensor
+    ) -> torch.Tensor:
+        """Decodes v-head latents into action-space predictions."""
+        B = z.shape[0]
+        max_action_dim = self.action_dim
+        decoded = torch.zeros(B, z.shape[1], max_action_dim, device=self.device, dtype=z.dtype)
+        for action_name, action_idx in self.action_space_index.action_spaces.items():
+            mask = (action_type == action_idx)
+            if mask.any():
+                adim = self.action_space_index.get_action_dim(action_idx)
+                if mask.all():
+                    pred = self.v_action_decoders[action_name](z, h)
+                else:
+                    h_masked = h[mask] if h.dim() >= 1 and h.shape[0] == B else h
+                    pred = self.v_action_decoders[action_name](z[mask], h_masked)
+                decoded[mask, :, :adim] = pred[..., :adim] * valid_dims[mask, :, :adim]
+        return decoded
+
     # === Loss Functions ===
     def meanflow_loss(self, cond: dict, actions: torch.Tensor, dataset_idx: Any = None) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
@@ -536,12 +587,20 @@ class MeanFlowerVLA(nn.Module):
         texp = texp.float()
         rexp = rexp.float()
 
-        # Define network function for JVP
+        # Define network function for JVP — returns (u, v) with v as auxiliary
         def u_func(z_input, t_input, r_input):
             h_input = t_input - r_input
             t_flat = t_input.view(-1)
             h_flat = h_input.view(-1)
-            return self.dit_forward_meanflow(z_input, t_flat, h_flat, cond)
+            return self.dit_forward_meanflow(z_input, t_flat, h_flat, cond, return_v=True)
+
+        # v_cond_fn: get v-head prediction with h=0 (for JVP tangent)
+        def v_cond_fn(z_input, t_input):
+            t_flat = t_input.view(-1)
+            h_zero = torch.zeros_like(t_flat)
+            # Only need v, but forward returns (u, v)
+            _, v_out = self.dit_forward_meanflow(z_input, t_flat, h_zero, cond, return_v=True)
+            return v_out
 
         # Tangent vectors for JVP (float32 to match)
         dtdt = torch.ones_like(texp)
@@ -568,14 +627,16 @@ class MeanFlowerVLA(nn.Module):
             nn.Linear.forward = _jvp_safe_linear_forward
             RmsNorm.forward = _jvp_safe_rmsnorm_forward
             try:
-                # iMF boundary condition: v_pred = u(z, t, t) where h=0
-                v_pred = u_func(z, texp, texp)
+                # Get v-head prediction at h=0 for JVP tangent
+                v_c = v_cond_fn(z, texp)
 
-                # JVP with network's v prediction as tangent
-                u_pred, dudt = torch.func.jvp(
+                # JVP with has_aux=True: only differentiates u, v is auxiliary
+                # Returns (primal_out, tangent_out, aux) — 3-tuple
+                u_pred, dudt, v_pred = torch.func.jvp(
                     u_func,
                     (z, texp, rexp),
-                    (v_pred.detach(), dtdt, drdt)
+                    (v_c.detach(), dtdt, drdt),
+                    has_aux=True,
                 )
             finally:
                 nn.Linear.forward = _orig_linear_forward
@@ -584,6 +645,9 @@ class MeanFlowerVLA(nn.Module):
             # Compound function V (iMF Eq. 9)
             h = (texp - rexp).clamp(min=0.0, max=1.0)
             V = u_pred + h * dudt.detach()
+
+            # Stop gradient on target
+            v_target = v.detach()
 
             # Build valid mask
             valid_mask = torch.zeros_like(actions, dtype=torch.bool)
@@ -594,13 +658,13 @@ class MeanFlowerVLA(nn.Module):
                     mask_expanded = mask.view(-1, 1, 1).expand(-1, actions.size(1), adim).to(device)
                     valid_mask[mask, :, :adim] = mask_expanded[mask]
 
-            # Loss against (e - x) — network-independent target
-            diff_u = V - v  # v = e - x (computed earlier)
+            # iMF u-loss: ||V - (e - x)||^2
+            diff_u = V - v_target
             diff_u = diff_u * valid_mask.to(dtype=default_dtype)
             loss_u = (diff_u ** 2).sum(dim=(1, 2))
 
-            # Auxiliary v loss: supervises the boundary condition u(z,t,t) ≈ v
-            diff_v = v_pred - v
+            # Auxiliary v-head loss: ||v_pred - (e - x)||^2
+            diff_v = v_pred - v_target
             diff_v = diff_v * valid_mask.to(dtype=default_dtype)
             loss_v = (diff_v ** 2).sum(dim=(1, 2))
 
@@ -617,7 +681,7 @@ class MeanFlowerVLA(nn.Module):
         # Monitor metrics
         with torch.no_grad():
             valid_V = V[valid_mask]
-            valid_v = v[valid_mask]
+            valid_v = v_target[valid_mask]
             valid_vpred = v_pred[valid_mask]
             v_loss = ((valid_V - valid_v) ** 2).mean()  # ||V - (e-x)||^2
             v_aux_loss = ((valid_vpred - valid_v) ** 2).mean()  # ||v_pred - (e-x)||^2
@@ -746,7 +810,7 @@ class MeanFlowerVLA(nn.Module):
         z = z.to(dtype=dtype)
         t_tensor = torch.ones(b, device=device, dtype=dtype)
         h_tensor = torch.ones(b, device=device, dtype=dtype)
-        u = self.dit_forward_meanflow(z, t_tensor, h_tensor, cond)
+        u = self.dit_forward_meanflow(z, t_tensor, h_tensor, cond, return_v=False)
         z = z - u
 
         return z.clamp(-1, 1)
@@ -849,15 +913,18 @@ class MeanFlowerVLA(nn.Module):
                 "dataset_index": batch['task'].get('dataset_index', torch.zeros(action_pred.shape[0], device=self.device)).detach()
             }
 
-    def dit_forward_meanflow(self, z: torch.Tensor, t: torch.Tensor, h: torch.Tensor, cond_dict: dict) -> torch.Tensor:
+    def dit_forward_meanflow(self, z: torch.Tensor, t: torch.Tensor, h: torch.Tensor,
+                              cond_dict: dict, return_v: bool = True):
         """
         Forward pass through the DiT blocks using MeanFlowDecoder.
+        Returns (u, v) when return_v=True (training), or just u (inference).
 
         Args:
             z: Latent actions [B, T, action_dim]
             t: Current timestep [B]
             h: Timestep difference (t - r) [B]
             cond_dict: Conditioning dictionary
+            return_v: If True, also compute v-head output (for iMF training)
         """
         B, t_seq, d = z.shape
         working_dtype = z.dtype  # float32 during JVP, bf16 during inference
@@ -894,12 +961,30 @@ class MeanFlowerVLA(nn.Module):
         # Compute AdaLN modulation
         global_adaln = self.adaln(global_cond) if not self.action_type_adaln else self.action_specific_adaln(global_cond, action_type)
 
-        for layer in self.dit:
-            z = layer(z, global_cond, context=context, custom_attn_mask=None,
-                    custom_cross_attn_mask=cond_dict['attention_mask'], is_causal=True, global_adaln=global_adaln)
+        attn_kwargs = dict(context=context, custom_attn_mask=None,
+                           custom_cross_attn_mask=cond_dict['attention_mask'],
+                           is_causal=True, global_adaln=global_adaln)
 
-        # Decode actions with h-conditioned MeanFlowDecoder
-        return self.decode_actions_meanflow(z, h, action_type, valid_dims)
+        # Shared backbone
+        for layer in self.shared_blocks:
+            z = layer(z, global_cond, **attn_kwargs)
+
+        # u-head
+        z_u = z
+        for layer in self.u_head_blocks:
+            z_u = layer(z_u, global_cond, **attn_kwargs)
+        u = self.decode_actions_meanflow(z_u, h, action_type, valid_dims)
+
+        if not return_v:
+            return u
+
+        # v-head
+        z_v = z
+        for layer in self.v_head_blocks:
+            z_v = layer(z_v, global_cond, **attn_kwargs)
+        v_pred = self.decode_v(z_v, h, action_type, valid_dims)
+
+        return u, v_pred
 
     def encode_proprio(self, proprio: torch.Tensor, action_type: torch.Tensor, output_shape) -> torch.Tensor:
         """

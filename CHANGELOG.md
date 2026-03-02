@@ -1,21 +1,32 @@
 # MeanFlower VLA - Changelog
 
-## [2026-03-02] Switch from original MeanFlow to Improved Mean Flow (iMF)
+## [2026-03-02] Implement Improved Mean Flow (iMF) with v-head architecture
 
-**Problem**: Training loss decreases but validation MSE degrades after ~10k steps (0.137 at 10k → 0.291 at 30k). The root cause is the original MeanFlow's self-referential target `u_tgt = v - h * du/dt`: as network weights shift, the target drifts, creating bootstrap instability that adaptive weighting can mitigate but not eliminate.
+**Problem**: Training loss decreases but validation MSE degrades after ~10k steps (0.137 at 10k → 0.291 at 30k). The original MeanFlow's self-referential target `u_tgt = v - h * du/dt` causes bootstrap instability. Initial boundary-condition approach (using u-head at h=0 as v) failed — `dudt_norm` exploded from 438 to 5982 in 1k steps because the shared u-head parameters received conflicting gradients from `loss_u` and `loss_v`.
 
-**Solution**: Implement the Improved Mean Flow (iMF) formulation from Geng, Lu et al. (2025, arXiv:2512.02012). The key insight is that the original MF loss can be reformulated with a **network-independent target** `(e - x)` via a compound function `V = u + (t-r) * sg(du/dt)`.
+**Solution**: Full iMF architecture from Geng, Lu et al. (2025, arXiv:2512.02012) with a **separate v-head** (own transformer blocks + decoder), matching the official JAX implementation.
 
-**Algorithm changes:**
-1. **Boundary condition**: extra forward pass `v_pred = u(z, t, t)` (h=0) to get the network's velocity estimate
-2. **JVP tangent**: use `v_pred` (network's v estimate) instead of `e - x`
-3. **Compound function**: `V = u_pred + h * sg(du/dt)` replaces self-referential `u_tgt`
-4. **Loss**: `loss = loss_u + loss_v` where `loss_u = ||V - (e-x)||^2` (compound function) and `loss_v = ||v_pred - (e-x)||^2` (auxiliary, supervises boundary condition). Both use adaptive weighting.
-5. **Cost**: ~50% more compute (one extra forward pass), NOT 2x
+**Architecture changes:**
+- DiT blocks split into: `shared_blocks` (4 layers) + `u_head_blocks` (8 layers) + `v_head_blocks` (8 layers, new)
+- New `v_action_decoders` (MeanFlowDecoder per action space) for v-head output
+- New `aux_head_depth` config parameter (default: 8, matching reference)
+- Network returns `(u, v)` during training, just `u` during inference (v-head skipped)
 
-**Config changes**: None. Keeping current config (12L/768d/8h, wd=0.01, ema=0.999) to change one thing at a time.
+**Algorithm (matching official iMF implementation):**
+1. **v-head prediction**: `v_c = v_head(z, t, h=0)` — separate network head, own parameters
+2. **JVP with `has_aux=True`**: differentiates only u-head, v-head output is auxiliary
+3. **JVP tangent**: `v_c` (v-head prediction at h=0), not `e - x`
+4. **Compound function**: `V = u_pred + h * sg(du/dt)`
+5. **Loss**: `loss = loss_u + loss_v` where `loss_u = ||V - (e-x)||^2` and `loss_v = ||v_head - (e-x)||^2`
+6. **Key**: v-head has separate blocks → clean gradients from `loss_v`, no interference from noisy `loss_u`
 
-**Files changed**: `flower_vla/agents/meanflower.py`
+**Config changes:**
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| aux_head_depth | 8 | iMF default. 12 total = 4 shared + 8 per head |
+
+**Files changed**: `flower_vla/agents/meanflower.py`, `conf/trainer/agent/meanflower_vla.yaml`
 
 ## [2026-02-28] Fix MeanFlow training instability
 
