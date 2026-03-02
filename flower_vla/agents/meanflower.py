@@ -587,20 +587,19 @@ class MeanFlowerVLA(nn.Module):
         texp = texp.float()
         rexp = rexp.float()
 
-        # Define network function for JVP — returns (u, v) with v as auxiliary
+        # Define network function for JVP — returns u only (v computed separately)
         def u_func(z_input, t_input, r_input):
             h_input = t_input - r_input
             t_flat = t_input.view(-1)
             h_flat = h_input.view(-1)
-            return self.dit_forward_meanflow(z_input, t_flat, h_flat, cond, return_v=True)
+            return self.dit_forward_meanflow(z_input, t_flat, h_flat, cond, return_v=False)
 
         # v_cond_fn: get v-head prediction with h=0 (for JVP tangent)
         def v_cond_fn(z_input, t_input):
             t_flat = t_input.view(-1)
             h_zero = torch.zeros_like(t_flat)
-            # Only need v, but forward returns (u, v)
-            _, v_out = self.dit_forward_meanflow(z_input, t_flat, h_zero, cond, return_v=True)
-            return v_out
+            # v_only=True skips u-head, only runs shared + v-head
+            return self.dit_forward_meanflow(z_input, t_flat, h_zero, cond, v_only=True)
 
         # Tangent vectors for JVP (float32 to match)
         dtdt = torch.ones_like(texp)
@@ -628,16 +627,25 @@ class MeanFlowerVLA(nn.Module):
             RmsNorm.forward = _jvp_safe_rmsnorm_forward
             try:
                 # Get v-head prediction at h=0 for JVP tangent
-                v_c = v_cond_fn(z, texp)
+                # no_grad: we only need the value for the tangent direction,
+                # no need to retain the computation graph (saves ~12 blocks of activations)
+                with torch.no_grad():
+                    v_c = v_cond_fn(z, texp)
 
-                # JVP with has_aux=True: only differentiates u, v is auxiliary
-                # Returns (primal_out, tangent_out, aux) — 3-tuple
-                u_pred, dudt, v_pred = torch.func.jvp(
+                # JVP only through shared + u-head (NOT v-head)
+                # v_head blocks are excluded from JVP to save memory (~8 fewer
+                # blocks with dual tensor overhead)
+                u_pred, dudt = torch.func.jvp(
                     u_func,
                     (z, texp, rexp),
-                    (v_c.detach(), dtdt, drdt),
-                    has_aux=True,
+                    (v_c, dtdt, drdt),
                 )
+
+                # Compute v_pred separately outside JVP (with gradient for v-head loss)
+                # v_only=True skips u-head, only runs shared + v-head blocks
+                t_flat = texp.view(-1)
+                h_flat = (texp - rexp).view(-1)
+                v_pred = self.dit_forward_meanflow(z, t_flat, h_flat, cond, v_only=True)
             finally:
                 nn.Linear.forward = _orig_linear_forward
                 RmsNorm.forward = _orig_rmsnorm_forward
@@ -914,10 +922,15 @@ class MeanFlowerVLA(nn.Module):
             }
 
     def dit_forward_meanflow(self, z: torch.Tensor, t: torch.Tensor, h: torch.Tensor,
-                              cond_dict: dict, return_v: bool = True):
+                              cond_dict: dict, return_v: bool = True,
+                              v_only: bool = False):
         """
         Forward pass through the DiT blocks using MeanFlowDecoder.
-        Returns (u, v) when return_v=True (training), or just u (inference).
+
+        Modes:
+          - return_v=False, v_only=False: returns u only (used inside JVP)
+          - return_v=True, v_only=False: returns (u, v_pred)
+          - v_only=True: returns v_pred only, skipping u-head (memory efficient)
 
         Args:
             z: Latent actions [B, T, action_dim]
@@ -925,6 +938,7 @@ class MeanFlowerVLA(nn.Module):
             h: Timestep difference (t - r) [B]
             cond_dict: Conditioning dictionary
             return_v: If True, also compute v-head output (for iMF training)
+            v_only: If True, only compute v-head output, skip u-head entirely
         """
         B, t_seq, d = z.shape
         working_dtype = z.dtype  # float32 during JVP, bf16 during inference
@@ -968,6 +982,14 @@ class MeanFlowerVLA(nn.Module):
         # Shared backbone
         for layer in self.shared_blocks:
             z = layer(z, global_cond, **attn_kwargs)
+
+        if v_only:
+            # v-head only (skip u-head entirely to save memory)
+            z_v = z
+            for layer in self.v_head_blocks:
+                z_v = layer(z_v, global_cond, **attn_kwargs)
+            v_pred = self.decode_v(z_v, h, action_type, valid_dims)
+            return v_pred
 
         # u-head
         z_u = z
