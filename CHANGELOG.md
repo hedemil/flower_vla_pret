@@ -10,7 +10,7 @@
 1. **Boundary condition**: extra forward pass `v_pred = u(z, t, t)` (h=0) to get the network's velocity estimate
 2. **JVP tangent**: use `v_pred` (network's v estimate) instead of `e - x`
 3. **Compound function**: `V = u_pred + h * sg(du/dt)` replaces self-referential `u_tgt`
-4. **Loss target**: `||V - (e - x)||^2` — completely network-independent, no bootstrap drift
+4. **Loss**: `loss = loss_u + loss_v` where `loss_u = ||V - (e-x)||^2` (compound function) and `loss_v = ||v_pred - (e-x)||^2` (auxiliary, supervises boundary condition). Both use adaptive weighting.
 5. **Cost**: ~50% more compute (one extra forward pass), NOT 2x
 
 **Config changes**: None. Keeping current config (12L/768d/8h, wd=0.01, ema=0.999) to change one thing at a time.

@@ -595,23 +595,32 @@ class MeanFlowerVLA(nn.Module):
                     valid_mask[mask, :, :adim] = mask_expanded[mask]
 
             # Loss against (e - x) — network-independent target
-            diff = V - v  # v = e - x (computed earlier)
-            diff = diff * valid_mask.to(dtype=default_dtype)
-            loss_per_sample = (diff ** 2).sum(dim=(1, 2))
+            diff_u = V - v  # v = e - x (computed earlier)
+            diff_u = diff_u * valid_mask.to(dtype=default_dtype)
+            loss_u = (diff_u ** 2).sum(dim=(1, 2))
+
+            # Auxiliary v loss: supervises the boundary condition u(z,t,t) ≈ v
+            diff_v = v_pred - v
+            diff_v = diff_v * valid_mask.to(dtype=default_dtype)
+            loss_v = (diff_v ** 2).sum(dim=(1, 2))
 
             # Adaptive weighting: normalizes loss to ~1.0 per sample.
             norm_eps = 0.01
             norm_p = 1.0
-            adp_wt = (loss_per_sample.detach() + norm_eps) ** norm_p
-            loss_per_sample = loss_per_sample / adp_wt
+            adp_wt_u = (loss_u.detach() + norm_eps) ** norm_p
+            loss_u = loss_u / adp_wt_u
+            adp_wt_v = (loss_v.detach() + norm_eps) ** norm_p
+            loss_v = loss_v / adp_wt_v
 
-            loss = loss_per_sample.mean()
+            loss = (loss_u + loss_v).mean()
 
         # Monitor metrics
         with torch.no_grad():
             valid_V = V[valid_mask]
             valid_v = v[valid_mask]
+            valid_vpred = v_pred[valid_mask]
             v_loss = ((valid_V - valid_v) ** 2).mean()  # ||V - (e-x)||^2
+            v_aux_loss = ((valid_vpred - valid_v) ** 2).mean()  # ||v_pred - (e-x)||^2
             # Track du/dt magnitude — if this vanishes, the model degenerates
             # to standard flow and single-step sampling will fail.
             dudt_norm = dudt[valid_mask].norm(dim=0).mean()
@@ -639,6 +648,7 @@ class MeanFlowerVLA(nn.Module):
         losses_dict = {
             "loss": loss.item() if not (torch.isnan(loss).any() or torch.isinf(loss).any()) else 1e6,
             "v_loss": v_loss.item() if not (torch.isnan(v_loss).any() or torch.isinf(v_loss).any()) else 1e6,
+            "v_aux_loss": v_aux_loss.item() if not (torch.isnan(v_aux_loss).any() or torch.isinf(v_aux_loss).any()) else 1e6,
             "dudt_norm": dudt_norm.item(),
             "h_mean": h.mean().item(),
         }
