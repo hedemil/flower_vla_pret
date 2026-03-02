@@ -49,4 +49,4 @@ agent:
   noise_dist: 'logit_normal'
   P_mean: -0.4
   P_std: 1.0
-  data_proportion: 0.75
+  data_proportion: 0.5 # MF uses 0.75, IMF uses 0.5

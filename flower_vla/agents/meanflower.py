@@ -86,7 +86,7 @@ class MeanFlowerVLA(nn.Module):
         noise_dist: str = 'logit_normal',
         P_mean: float = -0.4,
         P_std: float = 1.0,
-        data_proportion: float = 1.0,
+        data_proportion: float = 0.5 # 1.0,
     ):
         """
         Initializes the MeanFlowerVLA agent that combines a pretrained vision–language model
