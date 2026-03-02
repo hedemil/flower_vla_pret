@@ -492,8 +492,11 @@ class MeanFlowerVLA(nn.Module):
     # === Loss Functions ===
     def meanflow_loss(self, cond: dict, actions: torch.Tensor, dataset_idx: Any = None) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
-        Computes the Mean Flow loss using JVP (Jacobian Vector Product).
-        Based on: https://github.com/Gsunshine/py-meanflow
+        Computes the Improved Mean Flow (iMF) loss using JVP.
+        Based on: Geng, Lu et al. (2025) "Improved Mean Flows" (arXiv:2512.02012)
+
+        Key difference from original MF: the training target is (e - x),
+        which is network-independent, eliminating bootstrap instability.
         """
         default_dtype = next(self.parameters()).dtype
         action_type = cond['action_type']
@@ -565,18 +568,22 @@ class MeanFlowerVLA(nn.Module):
             nn.Linear.forward = _jvp_safe_linear_forward
             RmsNorm.forward = _jvp_safe_rmsnorm_forward
             try:
+                # iMF boundary condition: v_pred = u(z, t, t) where h=0
+                v_pred = u_func(z, texp, texp)
+
+                # JVP with network's v prediction as tangent
                 u_pred, dudt = torch.func.jvp(
                     u_func,
                     (z, texp, rexp),
-                    (v, dtdt, drdt)
+                    (v_pred.detach(), dtdt, drdt)
                 )
             finally:
                 nn.Linear.forward = _orig_linear_forward
                 RmsNorm.forward = _orig_rmsnorm_forward
 
-            # u_tgt = v - h * du/dt
+            # Compound function V (iMF Eq. 9)
             h = (texp - rexp).clamp(min=0.0, max=1.0)
-            u_tgt = (v - h * dudt).detach()
+            V = u_pred + h * dudt.detach()
 
             # Build valid mask
             valid_mask = torch.zeros_like(actions, dtype=torch.bool)
@@ -587,16 +594,12 @@ class MeanFlowerVLA(nn.Module):
                     mask_expanded = mask.view(-1, 1, 1).expand(-1, actions.size(1), adim).to(device)
                     valid_mask[mask, :, :adim] = mask_expanded[mask]
 
-            # Compute loss only over valid dimensions
-            diff = u_pred - u_tgt
+            # Loss against (e - x) — network-independent target
+            diff = V - v  # v = e - x (computed earlier)
             diff = diff * valid_mask.to(dtype=default_dtype)
             loss_per_sample = (diff ** 2).sum(dim=(1, 2))
 
             # Adaptive weighting: normalizes loss to ~1.0 per sample.
-            # This is critical for MeanFlow stability — without it, the
-            # self-referential target u_tgt = v - h*du/dt creates a positive
-            # feedback loop where large du/dt → large loss → large gradients
-            # → even larger du/dt, causing divergence.
             norm_eps = 0.01
             norm_p = 1.0
             adp_wt = (loss_per_sample.detach() + norm_eps) ** norm_p
@@ -606,16 +609,17 @@ class MeanFlowerVLA(nn.Module):
 
         # Monitor metrics
         with torch.no_grad():
-            valid_u = u_pred[valid_mask]
+            valid_V = V[valid_mask]
             valid_v = v[valid_mask]
-            v_loss = ((valid_u - valid_v) ** 2).mean()
+            v_loss = ((valid_V - valid_v) ** 2).mean()  # ||V - (e-x)||^2
             # Track du/dt magnitude — if this vanishes, the model degenerates
             # to standard flow and single-step sampling will fail.
             dudt_norm = dudt[valid_mask].norm(dim=0).mean()
 
         # Check for NaN/Inf in outputs
-        if torch.isnan(u_pred).any() or torch.isinf(u_pred).any():
-            logger.warning(f"NaN/Inf detected in u_pred! "
+        if torch.isnan(V).any() or torch.isinf(V).any():
+            logger.warning(f"NaN/Inf detected in V! "
+                           f"V stats: min={V.min().item():.4f}, max={V.max().item():.4f}, "
                            f"u_pred stats: min={u_pred.min().item():.4f}, max={u_pred.max().item():.4f}, "
                            f"z stats: min={z.min().item():.4f}, max={z.max().item():.4f}, "
                            f"h stats: min={h.min().item():.4f}, max={h.max().item():.4f}")

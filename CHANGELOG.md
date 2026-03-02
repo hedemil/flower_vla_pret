@@ -1,5 +1,22 @@
 # MeanFlower VLA - Changelog
 
+## [2026-03-02] Switch from original MeanFlow to Improved Mean Flow (iMF)
+
+**Problem**: Training loss decreases but validation MSE degrades after ~10k steps (0.137 at 10k → 0.291 at 30k). The root cause is the original MeanFlow's self-referential target `u_tgt = v - h * du/dt`: as network weights shift, the target drifts, creating bootstrap instability that adaptive weighting can mitigate but not eliminate.
+
+**Solution**: Implement the Improved Mean Flow (iMF) formulation from Geng, Lu et al. (2025, arXiv:2512.02012). The key insight is that the original MF loss can be reformulated with a **network-independent target** `(e - x)` via a compound function `V = u + (t-r) * sg(du/dt)`.
+
+**Algorithm changes:**
+1. **Boundary condition**: extra forward pass `v_pred = u(z, t, t)` (h=0) to get the network's velocity estimate
+2. **JVP tangent**: use `v_pred` (network's v estimate) instead of `e - x`
+3. **Compound function**: `V = u_pred + h * sg(du/dt)` replaces self-referential `u_tgt`
+4. **Loss target**: `||V - (e - x)||^2` — completely network-independent, no bootstrap drift
+5. **Cost**: ~50% more compute (one extra forward pass), NOT 2x
+
+**Config changes**: None. Keeping current config (12L/768d/8h, wd=0.01, ema=0.999) to change one thing at a time.
+
+**Files changed**: `flower_vla/agents/meanflower.py`
+
 ## [2026-02-28] Fix MeanFlow training instability
 
 **Problem**: Training collapses after ~20k steps. Val MSE: 0.127 (20k) → 0.562 (30k), a 4.4x regression. The MeanFlow loss is self-referential (`u_tgt = v - h * du/dt`), making it sensitive to hyperparameters that standard rectified flow tolerates.
