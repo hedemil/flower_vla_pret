@@ -706,7 +706,7 @@ class MeanFlowerVLA(nn.Module):
             v_aux_loss = ((valid_vpred - valid_v) ** 2).mean()  # ||v_pred - (e-x)||^2
             # Track du/dt magnitude (raw, pre-clip) — if this vanishes, the model
             # degenerates to standard flow and single-step sampling will fail.
-            dudt_norm = dudt_raw[valid_mask].norm(dim=0).mean()
+            dudt_norm = dudt_raw.flatten(1).norm(dim=1).mean()
             dudt_clip_frac = (dudt_norms > self.max_dudt_norm).float().mean()
 
         # Check for NaN/Inf in outputs
