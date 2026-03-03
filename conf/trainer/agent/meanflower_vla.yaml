@@ -53,4 +53,4 @@ agent:
   # iMF v-head: splits last aux_head_depth blocks into separate u-head and v-head
   aux_head_depth: 8 # iMF default: 8 (with 12 total = 4 shared + 8 per head)
   # dudt norm clipping: clips per-sample JVP tangent norm to prevent V domination
-  max_dudt_norm: 50.0
+  max_dudt_norm: 20.0
