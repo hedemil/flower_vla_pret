@@ -143,6 +143,7 @@ class MeanFlowerVLA(nn.Module):
         self.use_dopri5 = False
 
         
+        self.max_dudt_norm = max_dudt_norm
         self._setup_dit_components_meanflow(
             dit_dim, n_heads, n_layers, action_dim, act_window_size, hidden_dim,
             attn_pdrop, resid_pdrop, mlp_pdrop, use_cross_attn,
@@ -348,7 +349,6 @@ class MeanFlowerVLA(nn.Module):
         shared_depth = n_layers - aux_head_depth
         assert shared_depth >= 0, f"aux_head_depth ({aux_head_depth}) must be <= n_layers ({n_layers})"
         self.aux_head_depth = aux_head_depth
-        self.max_dudt_norm = max_dudt_norm
 
         block_kwargs = dict(
             dim=dit_dim,
