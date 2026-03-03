@@ -1,5 +1,20 @@
 # MeanFlower VLA - Changelog
 
+## [2026-03-03] Fix dudt_norm explosion: clip JVP tangent per-sample norm
+
+**Problem**: Despite `detach_time_cond` fix (20x improvement), `dudt_norm` still grows unboundedly and destabilizes training around step 3-4k:
+- Step 1: dudt_norm=0 (zero-init works)
+- Step 2k: dudt_norm=177 (healthy)
+- Step 4k: dudt_norm=665 (destabilized, v_loss turning up)
+
+**Root cause**: The remaining dudt growth comes from `∂u/∂z · v_c` — the Jacobian of u w.r.t. input z, scaled by v-head prediction. This propagates through all DiT blocks where adaLN **gate values** (not tangents) scale the JVP tangent at each block. As gates grow from zero-init during training, the Jacobian grows multiplicatively through depth. Since dudt is detached in `V = u + h * sg(dudt)`, it receives no direct gradient pressure to stay small.
+
+**Fix**: Clip per-sample L2 norm of dudt before use in V (analogous to gradient clipping). `max_dudt_norm=50.0` gives ~3x headroom above expected converged value (~17 for 128-dim actions). Clipping preserves direction. Raw (pre-clip) `dudt_norm` still logged for diagnosis, plus new `dudt_clip_frac` metric to monitor how often clipping activates.
+
+**Expected behavior**: `dudt_clip_frac` starts high and decreases as model converges to correct dudt. If it stays at 1.0, increase `max_dudt_norm`.
+
+**Files changed**: `flower_vla/agents/meanflower.py`, `conf/trainer/agent/meanflower_vla.yaml`
+
 ## [2026-03-03] Fix dudt explosion: detach time conditioning from JVP
 
 **Problem**: Despite zero-init (dudt=0 at step 1), `dudt_norm` still explodes to 2199 by step 1k, and `v_loss` increases from 1.18 to 9.64 (v-head getting worse).

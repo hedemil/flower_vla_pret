@@ -89,6 +89,8 @@ class MeanFlowerVLA(nn.Module):
         data_proportion: float = 0.5, # 1.0,
         # iMF v-head configuration
         aux_head_depth: int = 8,
+        # dudt clipping
+        max_dudt_norm: float = 50.0,
     ):
         """
         Initializes the MeanFlowerVLA agent that combines a pretrained vision–language model
@@ -346,6 +348,7 @@ class MeanFlowerVLA(nn.Module):
         shared_depth = n_layers - aux_head_depth
         assert shared_depth >= 0, f"aux_head_depth ({aux_head_depth}) must be <= n_layers ({n_layers})"
         self.aux_head_depth = aux_head_depth
+        self.max_dudt_norm = max_dudt_norm
 
         block_kwargs = dict(
             dim=dit_dim,
@@ -651,6 +654,13 @@ class MeanFlowerVLA(nn.Module):
                 nn.Linear.forward = _orig_linear_forward
                 RmsNorm.forward = _orig_rmsnorm_forward
 
+            # Clip dudt per-sample norm to prevent V domination
+            # (analogous to gradient clipping — bounds the correction term)
+            dudt_raw = dudt.detach()  # save raw for logging
+            dudt_norms = dudt.flatten(1).norm(dim=1)  # [B]
+            clip_scale = (self.max_dudt_norm / dudt_norms.clamp(min=1e-8)).clamp(max=1.0)  # [B]
+            dudt = dudt * clip_scale.view(-1, *([1] * (dudt.dim() - 1)))
+
             # Compound function V (iMF Eq. 9)
             h = (texp - rexp).clamp(min=0.0, max=1.0)
             V = u_pred + h * dudt.detach()
@@ -694,9 +704,10 @@ class MeanFlowerVLA(nn.Module):
             valid_vpred = v_pred[valid_mask]
             v_loss = ((valid_V - valid_v) ** 2).mean()  # ||V - (e-x)||^2
             v_aux_loss = ((valid_vpred - valid_v) ** 2).mean()  # ||v_pred - (e-x)||^2
-            # Track du/dt magnitude — if this vanishes, the model degenerates
-            # to standard flow and single-step sampling will fail.
-            dudt_norm = dudt[valid_mask].norm(dim=0).mean()
+            # Track du/dt magnitude (raw, pre-clip) — if this vanishes, the model
+            # degenerates to standard flow and single-step sampling will fail.
+            dudt_norm = dudt_raw[valid_mask].norm(dim=0).mean()
+            dudt_clip_frac = (dudt_norms > self.max_dudt_norm).float().mean()
 
         # Check for NaN/Inf in outputs
         if torch.isnan(V).any() or torch.isinf(V).any():
@@ -723,6 +734,7 @@ class MeanFlowerVLA(nn.Module):
             "v_loss": v_loss.item() if not (torch.isnan(v_loss).any() or torch.isinf(v_loss).any()) else 1e6,
             "v_aux_loss": v_aux_loss.item() if not (torch.isnan(v_aux_loss).any() or torch.isinf(v_aux_loss).any()) else 1e6,
             "dudt_norm": dudt_norm.item(),
+            "dudt_clip_frac": dudt_clip_frac.item(),
             "h_mean": h.mean().item(),
         }
 
