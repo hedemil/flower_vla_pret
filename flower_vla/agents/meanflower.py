@@ -592,7 +592,8 @@ class MeanFlowerVLA(nn.Module):
             h_input = t_input - r_input
             t_flat = t_input.view(-1)
             h_flat = h_input.view(-1)
-            return self.dit_forward_meanflow(z_input, t_flat, h_flat, cond, return_v=False)
+            return self.dit_forward_meanflow(z_input, t_flat, h_flat, cond, return_v=False,
+                                            detach_time_cond=True)
 
         # v_cond_fn: get v-head prediction with h=0 (for JVP tangent)
         def v_cond_fn(z_input, t_input):
@@ -923,7 +924,7 @@ class MeanFlowerVLA(nn.Module):
 
     def dit_forward_meanflow(self, z: torch.Tensor, t: torch.Tensor, h: torch.Tensor,
                               cond_dict: dict, return_v: bool = True,
-                              v_only: bool = False):
+                              v_only: bool = False, detach_time_cond: bool = False):
         """
         Forward pass through the DiT blocks using MeanFlowDecoder.
 
@@ -939,6 +940,11 @@ class MeanFlowerVLA(nn.Module):
             cond_dict: Conditioning dictionary
             return_v: If True, also compute v-head output (for iMF training)
             v_only: If True, only compute v-head output, skip u-head entirely
+            detach_time_cond: If True, detach t before t_embedder so JVP tangent
+                doesn't include ∂u/∂t through the deep adaLN chain. The official
+                iMF (Geng et al.) uses token-based conditioning with vector gates
+                (no adaLN), so ∂u/∂t doesn't propagate through blocks. This flag
+                achieves the same effect with our adaLN architecture.
         """
         B, t_seq, d = z.shape
         working_dtype = z.dtype  # float32 during JVP, bf16 during inference
@@ -961,7 +967,12 @@ class MeanFlowerVLA(nn.Module):
             proprio_embeds = proprio_embeds * (1 - drop_mask)
 
         # Compute temporal embedding
-        t_emb = sum(map(stateless_norm, [self.t_embedder(t), freq_embeds, proprio_embeds]))
+        # When detach_time_cond=True (during JVP), detach t so the JVP tangent
+        # doesn't include ∂u/∂t through the adaLN chain. This prevents dudt
+        # explosion from high-frequency sinusoidal embeddings amplified through
+        # all DiT blocks. The primal value is unchanged; only the tangent is zeroed.
+        t_for_emb = t.detach() if detach_time_cond else t
+        t_emb = sum(map(stateless_norm, [self.t_embedder(t_for_emb), freq_embeds, proprio_embeds]))
 
         # Compute global conditioning
         if self.use_adaln_cond:

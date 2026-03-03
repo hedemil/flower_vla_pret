@@ -1,5 +1,25 @@
 # MeanFlower VLA - Changelog
 
+## [2026-03-03] Fix dudt explosion: detach time conditioning from JVP
+
+**Problem**: Despite zero-init (dudt=0 at step 1), `dudt_norm` still explodes to 2199 by step 1k, and `v_loss` increases from 1.18 to 9.64 (v-head getting worse).
+
+**Root cause**: Architectural mismatch with official iMF. Our DiT uses **adaLN modulation** conditioned on `t` through every block: `t → t_embedder → global_cond → adaLN_modulation → shift/scale/gate`. This creates a deep `∂u/∂t` chain through ALL blocks that amplifies `dudt` via the JVP. The sinusoidal embedding has frequencies up to 1000, making `∂t_emb/∂t` huge.
+
+The official iMF (`imfDiT.py`) uses a fundamentally different architecture:
+- **No adaLN** — uses simple zero-init vector gates (`attn_scale`, `mlp_scale`)
+- **h enters as tokens** in the sequence, not as global conditioning
+- Transformer blocks have NO time-dependent modulation
+- `∂u/∂h` only propagates through attention (bounded by softmax) and the decoder (shallow)
+
+**Fix**: Detach `t` before `t_embedder` during JVP (`detach_time_cond=True`). This zeroes the JVP tangent through the adaLN chain while keeping the primal computation correct. After this fix:
+- `dudt = ∂u/∂z · v_c + ∂u/∂h_decoder` (shallow, bounded)
+- The deep `∂u/∂t_emb` through all blocks is eliminated
+- Blocks still receive correct time conditioning (only the tangent is zeroed, not the value)
+- `t_embedder` weights still get gradients from `loss_v` (v_pred is computed without detach)
+
+**Files changed**: `flower_vla/agents/meanflower.py`
+
 ## [2026-03-02] Fix v-head training instability: zero-init output layers
 
 **Problem**: `dudt_norm` explodes from 450 to 6242 in 1k steps after adding v-head architecture. Compared against official iMF JAX implementation (`imfDiT.py`).
