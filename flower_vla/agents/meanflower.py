@@ -427,41 +427,43 @@ class MeanFlowerVLA(nn.Module):
         default_dtype = next(self.parameters()).dtype
         image_tensor = batch[self.obs_modalities]['image_primary']
         B, T, C, H, W = image_tensor.shape
-        image_features = self.vlm._encode_image(
-            image_tensor.view(-1, C, H, W).to(device).to(default_dtype)
-        )
-        image_features = image_features.view(B, T * image_features.shape[1], -1)
-
-
-        if self.use_second_view and self.second_view_key in batch[self.obs_modalities]:
-            image2_tensor = batch[self.obs_modalities][self.second_view_key]
-            image2_features = self.vlm._encode_image(
-                image2_tensor.view(-1, C, H, W).to(device).to(default_dtype)
+        
+        with torch.autocast('cuda', dtype=torch.bfloat16):
+            image_features = self.vlm._encode_image(
+                image_tensor.view(-1, C, H, W).to(device).to(default_dtype)
             )
-            image2_features = image2_features.view(B, T * image2_features.shape[1], -1)
-            image_features = torch.cat([image_features, image2_features], dim=1)
+            image_features = image_features.view(B, T * image_features.shape[1], -1)
 
-        text_embeds = self.vlm.get_input_embeddings()(
-            batch[self.goal_modalities][self.lang_modalities[0]]['input_ids'].to(device)
-        ).to(device).squeeze(1)
 
-        # get the flow prompt for florence
-        task_prompt = self.prompt_embeds.expand(B, -1, -1)
-        merged_embeds = torch.cat([task_prompt.to(image_features.device), image_features, text_embeds.to(image_features.device)], dim=1)
+            if self.use_second_view and self.second_view_key in batch[self.obs_modalities]:
+                image2_tensor = batch[self.obs_modalities][self.second_view_key]
+                image2_features = self.vlm._encode_image(
+                    image2_tensor.view(-1, C, H, W).to(device).to(default_dtype)
+                )
+                image2_features = image2_features.view(B, T * image2_features.shape[1], -1)
+                image_features = torch.cat([image_features, image2_features], dim=1)
 
-        # get attention mask from txt
-        lang_attention_mask = batch[self.goal_modalities][self.lang_modalities[0]]['attention_mask'].to(device).squeeze(1)
-        # define attention mask for image — use bool dtype throughout for cross-attention compatibility
-        vis_attention_mask = torch.ones(image_features.shape[:2], dtype=torch.bool, device=image_features.device)
-        prompt_mask = torch.zeros(B, 1, dtype=torch.bool, device=image_features.device)
-        attention_mask = torch.cat([prompt_mask, vis_attention_mask, lang_attention_mask.bool()], dim=1)
+            text_embeds = self.vlm.get_input_embeddings()(
+                batch[self.goal_modalities][self.lang_modalities[0]]['input_ids'].to(device)
+            ).to(device).squeeze(1)
 
-        features = self.vlm.get_encoder()(
-            inputs_embeds=merged_embeds, 
-            attention_mask=attention_mask,
-        ).last_hidden_state
+            # get the flow prompt for florence
+            task_prompt = self.prompt_embeds.expand(B, -1, -1)
+            merged_embeds = torch.cat([task_prompt.to(image_features.device), image_features, text_embeds.to(image_features.device)], dim=1)
 
-        features = self.vlm_token_dropout(features)
+            # get attention mask from txt
+            lang_attention_mask = batch[self.goal_modalities][self.lang_modalities[0]]['attention_mask'].to(device).squeeze(1)
+            # define attention mask for image — use bool dtype throughout for cross-attention compatibility
+            vis_attention_mask = torch.ones(image_features.shape[:2], dtype=torch.bool, device=image_features.device)
+            prompt_mask = torch.zeros(B, 1, dtype=torch.bool, device=image_features.device)
+            attention_mask = torch.cat([prompt_mask, vis_attention_mask, lang_attention_mask.bool()], dim=1)
+
+            features = self.vlm.get_encoder()(
+                inputs_embeds=merged_embeds, 
+                attention_mask=attention_mask,
+            ).last_hidden_state
+
+            features = self.vlm_token_dropout(features)
 
         # add optinal cfg dropout
         if self.cfg_dropout > 0 and self.training:
@@ -601,13 +603,14 @@ class MeanFlowerVLA(nn.Module):
         texp = texp.float()
         rexp = rexp.float()
 
-        # Define network function for JVP — returns u only (v computed separately)
+        # Define network function for JVP — returns u only
         def u_func(z_input, t_input, r_input):
             h_input = t_input - r_input
             t_flat = t_input.view(-1)
             h_flat = h_input.view(-1)
+            # detach_time_cond=False is correct here as we want the full derivative wrt time
             return self.dit_forward_meanflow(z_input, t_flat, h_flat, cond, return_v=False,
-                                            detach_time_cond=True)
+                                            detach_time_cond=False)
 
         # v_cond_fn: get v-head prediction with h=0 (for JVP tangent)
         def v_cond_fn(z_input, t_input):
@@ -616,14 +619,13 @@ class MeanFlowerVLA(nn.Module):
             # v_only=True skips u-head, only runs shared + v-head
             return self.dit_forward_meanflow(z_input, t_flat, h_zero, cond, v_only=True)
 
-        # Tangent vectors for JVP (float32 to match)
-        dtdt = torch.ones_like(texp) * 1e-3
+        # Tangent vectors for JVP
+        # dt/dt = 1.0 (Official iMF)
+        dtdt = torch.ones_like(texp)
         drdt = torch.zeros_like(rexp)
 
         # Compute u and du/dt using JVP
         # Monkey-patch nn.Linear and RmsNorm to cast weights to input dtype
-        # during JVP, because torch.func.jvp dual tensors' .to(dtype) only
-        # casts the primal, not the tangent — so we cast weights instead.
         _orig_linear_forward = nn.Linear.forward
         _orig_rmsnorm_forward = RmsNorm.forward
 
@@ -641,23 +643,22 @@ class MeanFlowerVLA(nn.Module):
             nn.Linear.forward = _jvp_safe_linear_forward
             RmsNorm.forward = _jvp_safe_rmsnorm_forward
             try:
-                # Get v-head prediction at h=0 for JVP tangent
-                # no_grad: we only need the value for the tangent direction,
-                # no need to retain the computation graph (saves ~12 blocks of activations)
+                # 1. Get v_c (tangent for z) from v-head
+                # We need the value of v_c to drive the JVP, but we don't need gradients 
+                # flowing back through v_c into the network from the JVP calculation itself.
                 with torch.no_grad():
                     v_c = v_cond_fn(z, texp)
 
-                # JVP only through shared + u-head (NOT v-head)
-                # v_head blocks are excluded from JVP to save memory (~8 fewer
-                # blocks with dual tensor overhead)
+                # 2. JVP through shared + u-head
+                # Primals: (z, t, r)
+                # Tangents: (v_c, 1.0, 0.0) -> This computes du/dt + (du/dz) * v_c
                 u_pred, dudt = torch.func.jvp(
                     u_func,
                     (z, texp, rexp),
                     (v_c, dtdt, drdt),
                 )
 
-                # Compute v_pred separately outside JVP (with gradient for v-head loss)
-                # v_only=True skips u-head, only runs shared + v-head blocks
+                # 3. Compute v_pred (separately, with gradients for v-loss)
                 t_flat = texp.view(-1)
                 h_flat = (texp - rexp).view(-1)
                 v_pred = self.dit_forward_meanflow(z, t_flat, h_flat, cond, v_only=True)
@@ -665,18 +666,18 @@ class MeanFlowerVLA(nn.Module):
                 nn.Linear.forward = _orig_linear_forward
                 RmsNorm.forward = _orig_rmsnorm_forward
 
-            # Clip dudt per-sample norm to prevent V domination
-            # (analogous to gradient clipping — bounds the correction term)
-            dudt_raw = dudt.detach()  # save raw for logging
-            dudt_norms = dudt.flatten(1).norm(dim=1)  # [B]
-            clip_scale = (self.max_dudt_norm / dudt_norms.clamp(min=1e-8)).clamp(max=1.0)  # [B]
+            # Clip dudt per-sample norm (Official iMF uses 50.0)
+            dudt_raw = dudt.detach()
+            dudt_norms = dudt.flatten(1).norm(dim=1)
+            clip_scale = (self.max_dudt_norm / dudt_norms.clamp(min=1e-8)).clamp(max=1.0)
             dudt = dudt * clip_scale.view(-1, *([1] * (dudt.dim() - 1)))
 
             # Compound function V (iMF Eq. 9)
+            # Crucial: dudt is DETACHED in the official implementation
             h = (texp - rexp).clamp(min=0.0, max=1.0)
             V = u_pred + h * dudt.detach()
 
-            # Stop gradient on target
+            # Target velocity
             v_target = v.detach()
 
             # Build valid mask
@@ -688,25 +689,28 @@ class MeanFlowerVLA(nn.Module):
                     mask_expanded = mask.view(-1, 1, 1).expand(-1, actions.size(1), adim).to(device)
                     valid_mask[mask, :, :adim] = mask_expanded[mask]
 
+            # Adaptive Weighting Function (Official iMF)
+            def adp_wt_fn(loss_val):
+                # loss_val shape: [B]
+                norm_eps = 0.01
+                norm_p = 1.0
+                adp_wt = (loss_val.detach() + norm_eps) ** norm_p
+                return loss_val / adp_wt
+
             # iMF u-loss: ||V - (e - x)||^2
             diff_u = V - v_target
             diff_u = diff_u * valid_mask.to(dtype=default_dtype)
-            loss_u = (diff_u ** 2).sum(dim=(1, 2))
+            # Sum over action dims [B, T, D] -> [B]
+            loss_u_per_sample = (diff_u ** 2).sum(dim=(1, 2))
+            loss_u_weighted = adp_wt_fn(loss_u_per_sample)
 
             # Auxiliary v-head loss: ||v_pred - (e - x)||^2
             diff_v = v_pred - v_target
             diff_v = diff_v * valid_mask.to(dtype=default_dtype)
-            loss_v = (diff_v ** 2).sum(dim=(1, 2))
+            loss_v_per_sample = (diff_v ** 2).sum(dim=(1, 2))
+            loss_v_weighted = adp_wt_fn(loss_v_per_sample)
 
-            # Adaptive weighting: normalizes loss to ~1.0 per sample.
-            norm_eps = 0.01
-            norm_p = 1.0
-            adp_wt_u = (loss_u.detach() + norm_eps) ** norm_p
-            loss_u = loss_u / adp_wt_u
-            adp_wt_v = (loss_v.detach() + norm_eps) ** norm_p
-            loss_v = loss_v / adp_wt_v
-
-            loss = (loss_u + loss_v).mean()
+            loss = (loss_u_weighted + loss_v_weighted).mean()
 
         # Monitor metrics
         with torch.no_grad():

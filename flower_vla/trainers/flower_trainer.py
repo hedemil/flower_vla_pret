@@ -395,22 +395,28 @@ class AccelerateTrainer:
         with self.accelerator.accumulate(self.agent):
             self.agent.train()
 
-            with torch.autocast('cuda', dtype=torch.bfloat16):
-                loss = self.agent(batch, Mode.TRAINING)
-                if isinstance(loss, dict):
-                    loss = loss['loss']
-                elif not isinstance(loss, torch.Tensor):
-                    raise ValueError(f"Expected tensor loss, got {type(loss)}")
+            # Do NOT wrap in autocast here — meanflow_loss and encode_observations 
+            # manage their own precision internally.
+            loss = self.agent(batch, Mode.TRAINING)
+            if isinstance(loss, dict):
+                loss = loss['loss']
+            elif not isinstance(loss, torch.Tensor):
+                raise ValueError(f"Expected tensor loss, got {type(loss)}")
 
-                if torch.isnan(loss) or torch.isinf(loss):
-                    log.error(f"NaN/Inf in loss at step {self.global_step}")
-                    self.store_model_weights(self.working_dir, f"nan_error_{self.global_step}_")
-                    raise RuntimeError("Training stopped due to NaN/Inf loss")
+            if torch.isnan(loss) or torch.isinf(loss):
+                log.error(f"NaN/Inf in loss at step {self.global_step}")
+                self.store_model_weights(self.working_dir, f"nan_error_{self.global_step}_")
+                raise RuntimeError("Training stopped due to NaN/Inf loss")
 
             self.accelerator.backward(loss)
 
             if self.accelerator.sync_gradients:
-                self.accelerator.clip_grad_norm_(self.agent.module.agent.dit.parameters(), 1.0)
+                # Clip ALL non-VLM parameters, not just dit blocks
+                non_vlm_params = [
+                    p for n, p in self.agent.module.agent.named_parameters()
+                    if p.requires_grad and not n.startswith('vlm.')
+                ]
+                self.accelerator.clip_grad_norm_(non_vlm_params, 1.0)
                 self.accelerator.clip_grad_norm_(self.agent.module.agent.vlm.parameters(), 1.0)
 
             if self.single_optimizer:
