@@ -608,9 +608,10 @@ class MeanFlowerVLA(nn.Module):
             h_input = t_input - r_input
             t_flat = t_input.view(-1)
             h_flat = h_input.view(-1)
-            # detach_time_cond=False is correct here as we want the full derivative wrt time
+            # detach_time_cond=True enables the "Scalpel": it detaches the AdaLN path 
+            # (to prevent exponential explosion) while keeping the Token path active.
             return self.dit_forward_meanflow(z_input, t_flat, h_flat, cond, return_v=False,
-                                            detach_time_cond=False)
+                                            detach_time_cond=True)
 
         # v_cond_fn: get v-head prediction with h=0 (for JVP tangent)
         def v_cond_fn(z_input, t_input):
