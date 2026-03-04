@@ -25,7 +25,7 @@ agent:
   sampling_type: 'uniform'
   second_view_key: 'image_secondary'
   multistep: ${act_seq_len}
-  num_sampling_steps: 4
+  num_sampling_steps: 1
   lowdim_obs_dim: ${obs_dim}
   action_dim: ${act_dim}
   act_window_size: ${act_seq_len}
@@ -54,3 +54,4 @@ agent:
   aux_head_depth: 8 # iMF default: 8 (with 12 total = 4 shared + 8 per head)
   # dudt norm clipping: clips per-sample JVP tangent norm to prevent V domination
   max_dudt_norm: 20.0
+  u_head_vector_gates: true

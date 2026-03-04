@@ -167,7 +167,8 @@ class FlowerAttention(nn.Module):
 
     def forward(self, x: torch.Tensor,
                 custom_attn_mask: Optional[torch.Tensor] = None,
-                is_causal: bool = False) -> torch.Tensor:
+                is_causal: bool = False,
+                position_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Forward pass for self-attention.
         
@@ -186,7 +187,7 @@ class FlowerAttention(nn.Module):
         q = self.q_norm(q)
         k = self.k_norm(k)
         if self.use_rope:
-            q, k = apply_rotary_pos_emb(q, k, self.cos, self.sin)
+            q, k = apply_rotary_pos_emb(q, k, self.cos, self.sin, position_ids=position_ids)
         # Build attention mask if needed.
         # Causal masking is handled below in the elif is_causal branch.
         if custom_attn_mask is not None:
@@ -366,11 +367,13 @@ class FlowBlock(nn.Module):
                  query_seq_len: int = 128,
                  rope_theta: float = 32,
                  lora_dim: int = 256,
-                 use_global_adaln: bool = True) -> None:
+                 use_global_adaln: bool = True,
+                 use_vector_gates: bool = False) -> None:
         super().__init__()
         self.dim = dim
         self.use_cross_attn = use_cross_attn
         self.use_global_adaln = use_global_adaln
+        self.use_vector_gates = use_vector_gates
 
         self.norm1 = RmsNorm(dim, eps=1e-6)
         self.norm2 = RmsNorm(dim, eps=1e-6)
@@ -384,24 +387,31 @@ class FlowBlock(nn.Module):
                                                      attn_pdrop=attn_pdrop, resid_pdrop=resid_pdrop,
                                                      use_rope=False)
         self.mlp = SwiGlu(dim, dropout=mlp_pdrop)
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(dim, lora_dim),  # Down-project
-            nn.Linear(lora_dim, 6 * dim)  # Up-project to produce 6 modulation signals
-        )
-        # Zero-init output so gates start at 0 → each block is identity at init
-        nn.init.zeros_(self.adaLN_modulation[-1].weight)
-        nn.init.zeros_(self.adaLN_modulation[-1].bias)
+
+        if use_vector_gates:
+            # Per-channel vector gates (official iMF style): zero-init → block is identity at init
+            self.attn_scale = nn.Parameter(torch.zeros(dim))
+            self.mlp_scale = nn.Parameter(torch.zeros(dim))
+        else:
+            self.adaLN_modulation = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(dim, lora_dim),  # Down-project
+                nn.Linear(lora_dim, 6 * dim)  # Up-project to produce 6 modulation signals
+            )
+            # Zero-init output so gates start at 0 → each block is identity at init
+            nn.init.zeros_(self.adaLN_modulation[-1].weight)
+            nn.init.zeros_(self.adaLN_modulation[-1].bias)
 
     def forward(self, cx: torch.Tensor, c: torch.Tensor,
                 context: Optional[torch.Tensor] = None,
                 custom_attn_mask: Optional[torch.Tensor] = None,
                 custom_cross_attn_mask: Optional[torch.Tensor] = None,
                 is_causal: bool = False,
-                global_adaln: Optional[List[torch.Tensor]] = None) -> torch.Tensor:
+                global_adaln: Optional[List[torch.Tensor]] = None,
+                position_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Forward pass through the FlowBlock.
-        
+
         Args:
             cx: Input tensor for the block (e.g. action latent representations) of shape [B, L, D].
             c: Conditioning tensor (from external encoder).
@@ -409,14 +419,36 @@ class FlowBlock(nn.Module):
             custom_attn_mask: Optional attention mask.
             is_causal: If True, uses causal self-attention.
             global_adaln: Optional list of global AdaLN modulation signals.
-        
+            position_ids: Optional position indices for RoPE.
+
         Returns:
             Output tensor of shape [B, L, D].
         """
         B, L, D = cx.shape
         residual = cx
 
-        # Compute modulation signals.
+        if self.use_vector_gates:
+            # Vector gates mode: plain pre-LN, no adaLN modulation
+            x_norm = self.norm1(cx)
+            x_self = self.self_attn(x_norm, custom_attn_mask=custom_attn_mask,
+                                    is_causal=is_causal, position_ids=position_ids)
+            x_out = residual + self.attn_scale * x_self
+
+            if self.use_cross_attn:
+                if context is None:
+                    raise ValueError("Context is required for cross-attention.")
+                x_norm = self.norm2(x_out)
+                x_cross = self.cross_attn(x_norm, context, custom_attn_mask=custom_cross_attn_mask)
+                x_out = x_out + x_cross
+
+            norm_layer = self.norm3 if self.use_cross_attn else self.norm2
+            x_norm = norm_layer(x_out)
+            mlp_out = self.mlp(x_norm)
+            x_final = x_out + self.mlp_scale * mlp_out
+
+            return x_final
+
+        # AdaLN mode (default)
         modulation = self.adaLN_modulation(c)
         signals = modulation.chunk(6, dim=-1)
 
@@ -429,7 +461,8 @@ class FlowBlock(nn.Module):
         # Self-attention block with modulation.
         x_norm = self.norm1(cx)
         x_mod = modulate(x_norm, shift_msa, scale_msa)
-        x_self = self.self_attn(x_mod, custom_attn_mask=custom_attn_mask, is_causal=is_causal)
+        x_self = self.self_attn(x_mod, custom_attn_mask=custom_attn_mask,
+                                is_causal=is_causal, position_ids=position_ids)
         x_out = residual + gate_msa.unsqueeze(1) * x_self
 
         # Optionally apply cross-attention.

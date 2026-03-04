@@ -91,6 +91,8 @@ class MeanFlowerVLA(nn.Module):
         aux_head_depth: int = 8,
         # dudt clipping
         max_dudt_norm: float = 50.0,
+        # u-head vector gates (official iMF style, replaces adaLN in u-head)
+        u_head_vector_gates: bool = False,
     ):
         """
         Initializes the MeanFlowerVLA agent that combines a pretrained vision–language model
@@ -144,11 +146,13 @@ class MeanFlowerVLA(nn.Module):
 
         
         self.max_dudt_norm = max_dudt_norm
+        self.u_head_vector_gates = u_head_vector_gates
         self._setup_dit_components_meanflow(
             dit_dim, n_heads, n_layers, action_dim, act_window_size, hidden_dim,
             attn_pdrop, resid_pdrop, mlp_pdrop, use_cross_attn,
             use_rope, use_nope, query_seq_len, rope_theta,
             aux_head_depth=aux_head_depth,
+            u_head_vector_gates=u_head_vector_gates,
         )
         # Mean Flow specific parameters
         self.noise_dist = noise_dist
@@ -268,6 +272,7 @@ class MeanFlowerVLA(nn.Module):
         query_seq_len: int,
         rope_theta: float,
         aux_head_depth: int = 8,
+        u_head_vector_gates: bool = False,
     ) -> None:
         """
         Sets up DiT components for Mean Flow. Identical to _setup_dit_components
@@ -366,11 +371,17 @@ class MeanFlowerVLA(nn.Module):
             FlowBlock(**block_kwargs) for _ in range(shared_depth)
         ])
         self.u_head_blocks = nn.ModuleList([
-            FlowBlock(**block_kwargs) for _ in range(aux_head_depth)
+            FlowBlock(**block_kwargs, use_vector_gates=u_head_vector_gates)
+            for _ in range(aux_head_depth)
         ])
         self.v_head_blocks = nn.ModuleList([
             FlowBlock(**block_kwargs) for _ in range(aux_head_depth)
         ])
+
+        # Token embedders for u-head vector gates mode (tokenized conditioning)
+        if u_head_vector_gates:
+            self.u_head_t_token_embedder = TimestepEmbedder(hidden_size=dit_dim)
+            self.u_head_h_token_embedder = TimestepEmbedder(hidden_size=dit_dim)
 
         # v-head decoders (one per action space, like u-head)
         self.v_action_decoders = nn.ModuleDict()
@@ -1016,8 +1027,44 @@ class MeanFlowerVLA(nn.Module):
 
         # u-head
         z_u = z
-        for layer in self.u_head_blocks:
-            z_u = layer(z_u, global_cond, **attn_kwargs)
+        if self.u_head_vector_gates:
+            # Tokenized conditioning: prepend t and h as tokens
+            t_token = self.u_head_t_token_embedder(t).unsqueeze(1)   # [B, 1, dim]
+            h_token = self.u_head_h_token_embedder(h).unsqueeze(1)   # [B, 1, dim]
+            z_u = torch.cat([t_token, h_token, z_u], dim=1)          # [B, T+2, dim]
+            n_cond = 2
+            T_action = z.shape[1]
+
+            # RoPE position_ids: cond tokens [0,1], action tokens [0..T-1]
+            position_ids = torch.cat([
+                torch.arange(n_cond, device=z.device),
+                torch.arange(T_action, device=z.device),
+            ])  # [T+2]
+
+            # Custom attention mask (True=attend, False=block)
+            T_total = z_u.shape[1]
+            action_size = T_total - n_cond
+            mask = torch.zeros(T_total, T_total, dtype=torch.bool, device=z_u.device)
+            mask[:, :n_cond] = True                  # all positions attend to cond tokens
+            mask[:n_cond, :] = True                  # cond tokens attend to everything
+            mask[n_cond:, n_cond:] = ~torch.triu(    # action tokens: causal among themselves
+                torch.ones(action_size, action_size, dtype=torch.bool, device=z_u.device),
+                diagonal=1
+            )
+            mask = mask.unsqueeze(0)  # [1, T+2, T+2]
+
+            u_attn_kwargs = dict(context=context, custom_attn_mask=mask,
+                                 custom_cross_attn_mask=cond_dict['attention_mask'],
+                                 is_causal=False, global_adaln=global_adaln,
+                                 position_ids=position_ids)
+            for layer in self.u_head_blocks:
+                z_u = layer(z_u, global_cond, **u_attn_kwargs)
+
+            # Extract action tokens only (drop prepended conditioning)
+            z_u = z_u[:, n_cond:, :]  # [B, T, dim]
+        else:
+            for layer in self.u_head_blocks:
+                z_u = layer(z_u, global_cond, **attn_kwargs)
         u = self.decode_actions_meanflow(z_u, h, action_type, valid_dims)
 
         if not return_v:
