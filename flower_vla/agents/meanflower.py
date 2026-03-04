@@ -690,68 +690,68 @@ class MeanFlowerVLA(nn.Module):
                     mask_expanded = mask.view(-1, 1, 1).expand(-1, actions.size(1), adim).to(device)
                     valid_mask[mask, :, :adim] = mask_expanded[mask]
 
-            # Adaptive Weighting Function (Official iMF)
-            def adp_wt_fn(loss_val):
-                # loss_val shape: [B]
-                norm_eps = 0.01
-                norm_p = 1.0
-                adp_wt = (loss_val.detach() + norm_eps) ** norm_p
-                return loss_val / adp_wt
-
             # iMF u-loss: ||V - (e - x)||^2
             diff_u = V - v_target
             diff_u = diff_u * valid_mask.to(dtype=default_dtype)
             # Sum over action dims [B, T, D] -> [B]
             loss_u_per_sample = (diff_u ** 2).sum(dim=(1, 2))
-            loss_u_weighted = adp_wt_fn(loss_u_per_sample)
+            
+            # Detach denominator for adaptive weighting
+            norm_eps = 0.01
+            norm_p = 1.0
+            adp_wt_u = (loss_u_per_sample.detach() + norm_eps) ** norm_p
+            loss_u_weighted = loss_u_per_sample / adp_wt_u
 
             # Auxiliary v-head loss: ||v_pred - (e - x)||^2
             diff_v = v_pred - v_target
             diff_v = diff_v * valid_mask.to(dtype=default_dtype)
             loss_v_per_sample = (diff_v ** 2).sum(dim=(1, 2))
-            loss_v_weighted = adp_wt_fn(loss_v_per_sample)
+            
+            adp_wt_v = (loss_v_per_sample.detach() + norm_eps) ** norm_p
+            loss_v_weighted = loss_v_per_sample / adp_wt_v
 
             loss = (loss_u_weighted + loss_v_weighted).mean()
 
         # Monitor metrics
         with torch.no_grad():
             valid_V = V[valid_mask]
-            valid_v = v_target[valid_mask]
+            valid_v_target = v_target[valid_mask]
             valid_vpred = v_pred[valid_mask]
-            v_loss = ((valid_V - valid_v) ** 2).mean()  # ||V - (e-x)||^2
-            v_aux_loss = ((valid_vpred - valid_v) ** 2).mean()  # ||v_pred - (e-x)||^2
-            # Track du/dt magnitude (raw, pre-clip) — if this vanishes, the model
-            # degenerates to standard flow and single-step sampling will fail.
+            valid_u = u_pred[valid_mask]
+            valid_dudt = dudt[valid_mask]
+
+            v_loss = ((valid_V - valid_v_target) ** 2).mean()
+            v_aux_loss = ((valid_vpred - valid_v_target) ** 2).mean()
+            
+            # Magnitudes
+            u_norm = valid_u.norm(p=2, dim=-1).mean()
+            v_pred_norm = valid_vpred.norm(p=2, dim=-1).mean()
+            target_norm = valid_v_target.norm(p=2, dim=-1).mean()
             dudt_norm = dudt_raw.flatten(1).norm(dim=1).mean()
+            
+            # Cosine Similarities (Directional alignment)
+            cos_sim_u = F.cosine_similarity(valid_u, valid_v_target, dim=-1).mean()
+            cos_sim_V = F.cosine_similarity(valid_V, valid_v_target, dim=-1).mean()
+            cos_sim_vpred = F.cosine_similarity(valid_vpred, valid_v_target, dim=-1).mean()
+            
             dudt_clip_frac = (dudt_norms > self.max_dudt_norm).float().mean()
-
-        # Check for NaN/Inf in outputs
-        if torch.isnan(V).any() or torch.isinf(V).any():
-            logger.warning(f"NaN/Inf detected in V! "
-                           f"V stats: min={V.min().item():.4f}, max={V.max().item():.4f}, "
-                           f"u_pred stats: min={u_pred.min().item():.4f}, max={u_pred.max().item():.4f}, "
-                           f"z stats: min={z.min().item():.4f}, max={z.max().item():.4f}, "
-                           f"h stats: min={h.min().item():.4f}, max={h.max().item():.4f}")
-
-        if torch.isnan(loss).any() or torch.isinf(loss).any():
-            logger.warning("NaN/Inf detected in loss! Clipping to prevent crash.")
-            loss = torch.nan_to_num(loss, nan=1e6, posinf=1e6, neginf=1e6)
-
-        # Verify loss has gradient function
-        if loss.grad_fn is None and loss.requires_grad:
-            logger.warning("Loss requires_grad=True but has no grad_fn! "
-                           "This indicates a gradient tracking issue.")
-        elif not loss.requires_grad:
-            logger.error("Loss does not require gradients! Setting requires_grad=True")
-            loss.requires_grad_(True)
 
         losses_dict = {
             "loss": loss.item() if not (torch.isnan(loss).any() or torch.isinf(loss).any()) else 1e6,
-            "v_loss": v_loss.item() if not (torch.isnan(v_loss).any() or torch.isinf(v_loss).any()) else 1e6,
-            "v_aux_loss": v_aux_loss.item() if not (torch.isnan(v_aux_loss).any() or torch.isinf(v_aux_loss).any()) else 1e6,
+            "v_loss": v_loss.item(),
+            "v_aux_loss": v_aux_loss.item(),
             "dudt_norm": dudt_norm.item(),
             "dudt_clip_frac": dudt_clip_frac.item(),
             "h_mean": h.mean().item(),
+            # Deep Analysis Metrics
+            "mag/u_norm": u_norm.item(),
+            "mag/v_pred_norm": v_pred_norm.item(),
+            "mag/target_norm": target_norm.item(),
+            "sim/cos_u_target": cos_sim_u.item(),
+            "sim/cos_V_target": cos_sim_V.item(),
+            "sim/cos_vpred_target": cos_sim_vpred.item(),
+            "wt/adp_wt_u": adp_wt_u.mean().item(),
+            "wt/adp_wt_v": adp_wt_v.mean().item(),
         }
 
         if hasattr(self, 'accelerator') and self.accelerator is not None and wandb.run is not None:
