@@ -1,5 +1,25 @@
 # MeanFlower VLA - Changelog
 
+## [2026-03-04] Fix iMF implementation and training stability
+
+**Problem**: The Improved Mean Flow (iMF) implementation had several critical discrepancies from the official reference (arXiv:2512.02012), and the training step had numerical and efficiency issues:
+- **Incorrect JVP**: The tangent for $z$ was set to zero, but should be the model's own v-head prediction ($v_c$).
+- **Time scaling**: `dtdt` was set to `1e-3`, effectively suppressing the derivative term $\dot{u}$.
+- **Autocast conflict**: The outer `autocast(bf16)` in `train_step` overrode the inner `autocast(enabled=False)` required for JVP, leading to corrupted or unstable gradients.
+- **Incomplete clipping**: Gradient clipping was restricted to `dit` blocks, missing critical encoders, decoders, and conditioning modules.
+
+**Fixes**:
+1. **Agent Logic (`meanflower.py`)**:
+   - Updated `meanflow_loss` to use `v_c` (v-head prediction) as the JVP tangent for $z$, aligning with the official implementation.
+   - Set `dtdt = 1.0` for correct temporal derivative calculation.
+   - Set `detach_time_cond=False` in the JVP's `u_func` to include full temporal dependence in the derivative.
+   - Added local `autocast(bf16)` in `encode_observations` to ensure VLM encoding efficiency now that the outer autocast is removed.
+2. **Trainer Logic (`flower_trainer.py`)**:
+   - Removed the outer `autocast` from `train_step` to ensure the JVP computation remains in `float32` for numerical safety.
+   - Expanded `clip_grad_norm_` to cover all non-VLM parameters (encoders, decoders, embedders, and controllers).
+
+**Files changed**: `flower_vla/agents/meanflower.py`, `flower_vla/trainers/flower_trainer.py`
+
 ## [2026-03-04] Move token prepend before shared blocks for full ∂u/∂t path
 
 **Problem**: With `max_dudt_norm=150` and no clipping, `v_loss` still degrades (0.44→0.73 over steps 2k-5k). The clip was not the root cause — unbounded `dudt` growth is. Token conditioning (t/h) was only prepended at the u-head (after shared blocks), so `∂u/∂t` through the bounded token/attention path only flowed through 8 of 12 layers.
