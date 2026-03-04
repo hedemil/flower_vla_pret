@@ -617,7 +617,7 @@ class MeanFlowerVLA(nn.Module):
             return self.dit_forward_meanflow(z_input, t_flat, h_zero, cond, v_only=True)
 
         # Tangent vectors for JVP (float32 to match)
-        dtdt = torch.ones_like(texp)
+        dtdt = torch.ones_like(texp) * 1e-3
         drdt = torch.zeros_like(rexp)
 
         # Compute u and du/dt using JVP

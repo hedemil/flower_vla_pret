@@ -1,5 +1,27 @@
 # MeanFlower VLA - Changelog
 
+## [2026-03-04] Move token prepend before shared blocks for full ∂u/∂t path
+
+**Problem**: With `max_dudt_norm=150` and no clipping, `v_loss` still degrades (0.44→0.73 over steps 2k-5k). The clip was not the root cause — unbounded `dudt` growth is. Token conditioning (t/h) was only prepended at the u-head (after shared blocks), so `∂u/∂t` through the bounded token/attention path only flowed through 8 of 12 layers.
+
+**Root cause**: The material derivative `du/dt` needs `∂u/∂t` to propagate through all layers that process the input. With tokens prepended only before u-head blocks, the shared blocks (4 layers) had no token-based `∂u/∂t` path — only the adaLN path (which is detached during JVP). Moving tokens before shared blocks gives the full 12-layer path via bounded attention, without adaLN amplification risk.
+
+**Fix**: Restructure `dit_forward_meanflow` to prepend t/h tokens before shared blocks instead of before u-head blocks:
+- Renamed `u_head_t_token_embedder` → `cond_t_token_embedder`, `u_head_h_token_embedder` → `cond_h_token_embedder`
+- Token prepend, custom attention mask, and position_ids now computed before shared block loop
+- Shared blocks run with tokens + custom mask (adaLN still active — tokens get modulated too, harmless)
+- v-head strips tokens after shared blocks → runs standard causal adaLN, unaffected
+- u-head continues with tokens through all 8 blocks, strips before decode
+- `else` branch (no vector gates) unchanged
+
+**Key properties**:
+- `detach_time_cond=True` still zeroes tangent through adaLN chain — no (1+scale)^4 amplification
+- `∂u/∂t` through token attention flows through all 12 layers — bounded by softmax
+- v-head architecture completely unaffected (strips tokens, uses standard causal mask)
+- Zero-init gates still ensure `dudt_norm ≈ 0` at step 1
+
+**Files changed**: `flower_vla/agents/meanflower.py`
+
 ## [2026-03-03] Fix dudt_norm explosion: clip JVP tangent per-sample norm
 
 **Problem**: Despite `detach_time_cond` fix (20x improvement), `dudt_norm` still grows unboundedly and destabilizes training around step 3-4k:
