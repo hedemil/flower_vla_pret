@@ -345,7 +345,14 @@ class AccelerateTrainer:
                     v_loss_aux = losses_info.get("v_aux_loss", float("nan"))
                     dudt_clip = losses_info.get("dudt_clip_frac", float("nan"))
                     dudt_norm = losses_info.get("dudt_norm", float("nan"))
-                    log.info(f"Step {self.global_step}: adaptive_loss={batch_loss:.6f}, v_loss={v_loss:.6f}, v_loss_aux={v_loss_aux:.6f}, dudt_norm={dudt_norm:.6f}, dudt_clip_frac={dudt_clip:.6f}")
+                    cos_V = losses_info.get("sim/cos_V_target", float("nan"))
+                    cos_vpred = losses_info.get("sim/cos_vpred_target", float("nan"))
+                    u_n = losses_info.get("mag/u_norm", float("nan"))
+                    tgt_n = losses_info.get("mag/target_norm", float("nan"))
+                    
+                    log.info(f"Step {self.global_step}: loss={batch_loss:.6f}, v_loss={v_loss:.4f}, v_aux={v_loss_aux:.4f}, "
+                             f"dudt_n={dudt_norm:.2f}, clip={dudt_clip:.2f}, cosV={cos_V:.3f}, cosVaux={cos_vpred:.3f}, "
+                             f"u_n={u_n:.2f}, tgt_n={tgt_n:.2f}")
 
                 if step % 100 == 0 and wandb.run is not None and self.accelerator.is_main_process:
                     # Get metrics from agent
