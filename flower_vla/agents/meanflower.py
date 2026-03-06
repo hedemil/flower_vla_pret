@@ -91,6 +91,10 @@ class MeanFlowerVLA(nn.Module):
         aux_head_depth: int = 8,
         # dudt clipping
         max_dudt_norm: float = 50.0,
+        # adaptive loss normalization epsilon
+        norm_eps: float = 0.01,
+        # soft dudt regularization (0.0 = disabled)
+        dudt_reg_lambda: float = 0.0,
         # u-head vector gates (official iMF style, replaces adaLN in u-head)
         u_head_vector_gates: bool = False,
     ):
@@ -146,6 +150,8 @@ class MeanFlowerVLA(nn.Module):
 
         
         self.max_dudt_norm = max_dudt_norm
+        self.norm_eps = norm_eps
+        self.dudt_reg_lambda = dudt_reg_lambda
         self.u_head_vector_gates = u_head_vector_gates
         self._setup_dit_components_meanflow(
             dit_dim, n_heads, n_layers, action_dim, act_window_size, hidden_dim,
@@ -697,9 +703,8 @@ class MeanFlowerVLA(nn.Module):
             loss_u_per_sample = (diff_u ** 2).sum(dim=(1, 2))
             
             # Detach denominator for adaptive weighting
-            norm_eps = 0.01
             norm_p = 1.0
-            adp_wt_u = (loss_u_per_sample.detach() + norm_eps) ** norm_p
+            adp_wt_u = (loss_u_per_sample.detach() + self.norm_eps) ** norm_p
             loss_u_weighted = loss_u_per_sample / adp_wt_u
 
             # Auxiliary v-head loss: ||v_pred - (e - x)||^2
@@ -707,10 +712,13 @@ class MeanFlowerVLA(nn.Module):
             diff_v = diff_v * valid_mask.to(dtype=default_dtype)
             loss_v_per_sample = (diff_v ** 2).sum(dim=(1, 2))
             
-            adp_wt_v = (loss_v_per_sample.detach() + norm_eps) ** norm_p
+            adp_wt_v = (loss_v_per_sample.detach() + self.norm_eps) ** norm_p
             loss_v_weighted = loss_v_per_sample / adp_wt_v
 
             loss = (loss_u_weighted + loss_v_weighted).mean()
+
+            if self.dudt_reg_lambda > 0:
+                loss = loss + self.dudt_reg_lambda * (dudt_norms ** 2).mean()
 
         # Monitor metrics
         with torch.no_grad():
@@ -736,6 +744,29 @@ class MeanFlowerVLA(nn.Module):
             
             dudt_clip_frac = (dudt_norms > self.max_dudt_norm).float().mean()
 
+            # V component analysis
+            h_dudt = h * dudt.detach()
+            h_dudt_norm = h_dudt.flatten(1).norm(dim=1).mean()
+            V_norm = V.flatten(1).norm(dim=1).mean()
+            dudt_over_target = dudt_norm / target_norm.clamp(min=1e-8)
+
+            # Inference-point diagnostic (every 1000 steps)
+            inference_diag = {}
+            if self._train_step % 1000 == 0 and self._train_step > 0:
+                z_1 = e.float()  # z at t=1 is pure noise
+                t_ones = torch.ones(b, device=device, dtype=torch.float32)
+                h_ones = torch.ones(b, device=device, dtype=torch.float32)
+                u_inf = self.dit_forward_meanflow(z_1, t_ones, h_ones, cond, return_v=False,
+                                                  detach_time_cond=False)
+                # Single-step prediction: x_pred = z_1 - u_inf
+                x_pred = z_1 - u_inf
+                inf_mse = ((x_pred - actions.float()) ** 2 * valid_mask.float()).sum() / valid_mask.float().sum().clamp(min=1)
+                u_inf_norm = u_inf.flatten(1).norm(dim=1).mean()
+                inference_diag = {
+                    "diag/inference_mse": inf_mse.item(),
+                    "diag/u_inf_norm": u_inf_norm.item(),
+                }
+
         losses_dict = {
             "loss": loss.item() if not (torch.isnan(loss).any() or torch.isinf(loss).any()) else 1e6,
             "v_loss": v_loss.item(),
@@ -752,7 +783,11 @@ class MeanFlowerVLA(nn.Module):
             "sim/cos_vpred_target": cos_sim_vpred.item(),
             "wt/adp_wt_u": adp_wt_u.mean().item(),
             "wt/adp_wt_v": adp_wt_v.mean().item(),
+            "mag/h_dudt_norm": h_dudt_norm.item(),
+            "mag/V_norm": V_norm.item(),
+            "ratio/dudt_over_target": dudt_over_target.item(),
         }
+        losses_dict.update(inference_diag)
 
         if hasattr(self, 'accelerator') and self.accelerator is not None and wandb.run is not None:
             if self.accelerator.is_main_process:

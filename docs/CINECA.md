@@ -28,6 +28,9 @@ cat flowervla-dbg_*.out
 # Train
 cat flowervla_*.out
 cat flowervla_*.err
+
+rm flowervla_*.out
+rm flowervla_*.err
 ```
 
 ## Sync with wandb
