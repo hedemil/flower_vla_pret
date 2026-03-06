@@ -30,7 +30,9 @@ echo ""
 for run_dir in "${WANDB_DIR}"/wandb/offline-run-*; do
     if [ -d "${run_dir}" ]; then
         echo "Syncing: $(basename "${run_dir}")"
-        wandb sync "${run_dir}"
+        if ! wandb sync "${run_dir}" 2>&1; then
+            echo "WARNING: Failed to sync $(basename "${run_dir}"), skipping (may have been deleted on wandb.ai)"
+        fi
         echo ""
     fi
 done
