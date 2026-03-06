@@ -14,7 +14,7 @@
 #   $WORK — venv, datasets, HF cache (large, read-heavy)
 # =============================================================================
 
-#SBATCH --job-name=flowervla_abl_
+#SBATCH --job-name=flowervla_abl_baseline
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1

@@ -348,6 +348,18 @@ FLOWER_EEF_MIX = [
     ("stanford_hydra_dataset_converted_externally_to_rlds", 6.0),
 ]
 
+FLOWER_EEF_MIX_ND = [
+    ("bridge_dataset", 4.0),
+    ("fractal20220817_data", 2.0),
+    ("dobbe", 2.0),
+    # ("fmb", 1.0),
+    ("bc_z", 0.8),
+    ("cmu_play_fusion", 6.0),
+    ("libero_10_no_noops", 10.0),
+    ("libero_goal_no_noops", 18.0),
+    ("stanford_hydra_dataset_converted_externally_to_rlds", 6.0),
+]
+
 ACTION_MIXED = [
     ("droid", 1.0),
     ("bridge_dataset", 1.0),
@@ -397,4 +409,5 @@ OXE_NAMED_MIXES = {
     "action_mixed": ACTION_MIXED,
     'test': TEST,
     "flowereef": FLOWER_EEF_MIX,
+    "flowereef_nd": FLOWER_EEF_MIX_ND,
 }
