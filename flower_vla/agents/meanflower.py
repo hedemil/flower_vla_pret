@@ -608,10 +608,34 @@ class MeanFlowerVLA(nn.Module):
         with torch.no_grad():
             valid_u = u_pred[valid_mask]
             valid_v = v[valid_mask]
+            valid_utgt = u_tgt[valid_mask]
             v_loss = ((valid_u - valid_v) ** 2).mean()
+            # Raw MSE before adaptive normalization — the real convergence signal
+            raw_mse = loss_per_sample.mean()
             # Track du/dt magnitude — if this vanishes, the model degenerates
             # to standard flow and single-step sampling will fail.
             dudt_norm = dudt[valid_mask].norm(dim=0).mean()
+            # Prediction/target norms
+            u_pred_norm = valid_u.norm(dim=0).mean()
+            u_tgt_norm = valid_utgt.norm(dim=0).mean()
+            # Cosine similarity: u_pred vs u_tgt (training alignment)
+            cos_u_utgt = F.cosine_similarity(
+                valid_u.unsqueeze(0), valid_utgt.unsqueeze(0), dim=-1
+            ).mean()
+            # Cosine similarity: u_pred vs v (single-step convergence)
+            cos_u_v = F.cosine_similarity(
+                valid_u.unsqueeze(0), valid_v.unsqueeze(0), dim=-1
+            ).mean()
+            # Per-timestep-bucket v_loss (where does the model struggle?)
+            t_flat = t.view(-1)
+            low_mask = t_flat < 0.3
+            mid_mask = (t_flat >= 0.3) & (t_flat < 0.7)
+            high_mask = t_flat >= 0.7
+            u_v_diff = (u_pred - v) ** 2 * valid_mask.to(dtype=default_dtype)
+            u_v_per_sample = u_v_diff.sum(dim=(1, 2))
+            vloss_t_low = u_v_per_sample[low_mask].mean() if low_mask.any() else torch.tensor(0.0)
+            vloss_t_mid = u_v_per_sample[mid_mask].mean() if mid_mask.any() else torch.tensor(0.0)
+            vloss_t_high = u_v_per_sample[high_mask].mean() if high_mask.any() else torch.tensor(0.0)
 
         # Check for NaN/Inf in outputs
         if torch.isnan(u_pred).any() or torch.isinf(u_pred).any():
@@ -634,8 +658,16 @@ class MeanFlowerVLA(nn.Module):
 
         losses_dict = {
             "loss": loss.item() if not (torch.isnan(loss).any() or torch.isinf(loss).any()) else 1e6,
+            "raw_mse": raw_mse.item(),
             "v_loss": v_loss.item() if not (torch.isnan(v_loss).any() or torch.isinf(v_loss).any()) else 1e6,
             "dudt_norm": dudt_norm.item(),
+            "u_pred_norm": u_pred_norm.item(),
+            "u_tgt_norm": u_tgt_norm.item(),
+            "cos_u_utgt": cos_u_utgt.item(),
+            "cos_u_v": cos_u_v.item(),
+            "vloss_t_low": vloss_t_low.item(),
+            "vloss_t_mid": vloss_t_mid.item(),
+            "vloss_t_high": vloss_t_high.item(),
             "h_mean": h.mean().item(),
         }
 

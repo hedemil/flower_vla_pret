@@ -341,9 +341,12 @@ class AccelerateTrainer:
                     torch.cuda.empty_cache()
                 if step % 1000 == 0 and self.accelerator.is_main_process:
                     losses_info = self.agent.module.agent.losses_dict
+                    raw_mse = losses_info.get("raw_mse", float("nan"))
                     v_loss = losses_info.get("v_loss", float("nan"))
                     dudt_norm = losses_info.get("dudt_norm", float("nan"))
-                    log.info(f"Step {self.global_step}: adaptive_loss={batch_loss:.6f}, v_loss={v_loss:.6f}, dudt_norm={dudt_norm:.6f}")
+                    cos_u_utgt = losses_info.get("cos_u_utgt", float("nan"))
+                    cos_u_v = losses_info.get("cos_u_v", float("nan"))
+                    log.info(f"Step {self.global_step}: raw_mse={raw_mse:.6f}, v_loss={v_loss:.6f}, dudt_norm={dudt_norm:.6f}, cos_u_utgt={cos_u_utgt:.4f}, cos_u_v={cos_u_v:.4f}")
 
                 if step % 100 == 0 and wandb.run is not None and self.accelerator.is_main_process:
                     # Get metrics from agent
