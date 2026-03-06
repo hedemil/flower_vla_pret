@@ -114,7 +114,9 @@ echo "max_dudt_norm=${MAX_DUDT}, norm_eps=${NORM_EPS}"
 
 cd "\${CODE_DIR}"
 
-python -m accelerate.commands.launch --num_processes 4 \
+python -m accelerate.commands.launch \
+    --num_processes 4 \
+    --mixed_precision=bf16 \
     flower_vla/training.py \
     datamodule.datasets.DATA_PATH="\${DATA_DIR}" \
     log_dir="\${OUTPUT_DIR}" \
