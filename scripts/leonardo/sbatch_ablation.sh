@@ -45,24 +45,30 @@ echo "=== iMF Ablation Grid (Phase 1) ==="
 echo "Steps: ${MAX_STEPS}, Eval every: ${EVAL_EVERY}, Wall time: ${WALL_TIME}"
 echo ""
 
+JOB_SCRIPT_DIR="${OUTPUT_DIR}/ablation_scripts"
+mkdir -p "${JOB_SCRIPT_DIR}"
+
 for entry in "${ABLATIONS[@]}"; do
     IFS='|' read -r NAME MAX_DUDT NORM_EPS <<< "$entry"
 
     JOB_NAME="abl_${NAME}"
+    JOB_SCRIPT="${JOB_SCRIPT_DIR}/${JOB_NAME}.sh"
     echo "Submitting ${JOB_NAME}: max_dudt_norm=${MAX_DUDT}, norm_eps=${NORM_EPS}"
 
-    sbatch --job-name="${JOB_NAME}" \
-           --partition=boost_usr_prod \
-           --qos=normal \
-           --nodes=1 \
-           --ntasks-per-node=1 \
-           --gpus-per-node=4 \
-           --cpus-per-task=32 \
-           --mem=256G \
-           --time="${WALL_TIME}" \
-           --output="${JOB_NAME}_%j.out" \
-           --error="${JOB_NAME}_%j.err" \
-           --wrap="$(cat <<WRAP_EOF
+    cat > "${JOB_SCRIPT}" <<EOF
+#!/bin/bash
+#SBATCH --job-name=${JOB_NAME}
+#SBATCH --partition=boost_usr_prod
+#SBATCH --qos=normal
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=256G
+#SBATCH --time=${WALL_TIME}
+#SBATCH --output=${JOB_NAME}_%j.out
+#SBATCH --error=${JOB_NAME}_%j.err
+
 set -euo pipefail
 
 FAST_PROJECT="${FAST_PROJECT}"
@@ -106,20 +112,21 @@ echo "max_dudt_norm=${MAX_DUDT}, norm_eps=${NORM_EPS}"
 
 cd "\${CODE_DIR}"
 
-python -m accelerate.commands.launch --num_processes 4 \\
-    flower_vla/training.py \\
-    datamodule.datasets.DATA_PATH="\${DATA_DIR}" \\
-    log_dir="\${OUTPUT_DIR}" \\
-    wandb.name=${NAME}_\${SLURM_JOB_ID} \\
-    wandb.entity=null \\
-    wandb.mode=offline \\
-    max_train_steps=${MAX_STEPS} \\
-    eval_every_n_steps=${EVAL_EVERY} \\
-    save_every_n_steps=${SAVE_EVERY} \\
-    trainer.agent.agent.max_dudt_norm=${MAX_DUDT} \\
+python -m accelerate.commands.launch --num_processes 4 \
+    flower_vla/training.py \
+    datamodule.datasets.DATA_PATH="\${DATA_DIR}" \
+    log_dir="\${OUTPUT_DIR}" \
+    wandb.name=${NAME}_\${SLURM_JOB_ID} \
+    wandb.entity=null \
+    wandb.mode=offline \
+    max_train_steps=${MAX_STEPS} \
+    eval_every_n_steps=${EVAL_EVERY} \
+    save_every_n_steps=${SAVE_EVERY} \
+    trainer.agent.agent.max_dudt_norm=${MAX_DUDT} \
     trainer.agent.agent.norm_eps=${NORM_EPS}
-WRAP_EOF
-)"
+EOF
+
+    sbatch "${JOB_SCRIPT}"
 
 done
 
