@@ -53,6 +53,7 @@ for entry in "${ABLATIONS[@]}"; do
 
     sbatch --job-name="${JOB_NAME}" \
            --partition=boost_usr_prod \
+           --qos=normal \
            --nodes=1 \
            --ntasks-per-node=1 \
            --gpus-per-node=4 \
