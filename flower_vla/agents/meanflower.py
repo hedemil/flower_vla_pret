@@ -753,14 +753,15 @@ class MeanFlowerVLA(nn.Module):
             # Inference-point diagnostic (every 1000 steps)
             inference_diag = {}
             if self._train_step % 1000 == 0 and self._train_step > 0:
-                z_1 = e.float()  # z at t=1 is pure noise
-                t_ones = torch.ones(b, device=device, dtype=torch.float32)
-                h_ones = torch.ones(b, device=device, dtype=torch.float32)
-                u_inf = self.dit_forward_meanflow(z_1, t_ones, h_ones, cond, return_v=False,
-                                                  detach_time_cond=False)
+                z_1 = e.to(dtype=default_dtype)  # z at t=1 is pure noise
+                t_ones = torch.ones(b, device=device, dtype=default_dtype)
+                h_ones = torch.ones(b, device=device, dtype=default_dtype)
+                with torch.amp.autocast("cuda", enabled=False):
+                    u_inf = self.dit_forward_meanflow(z_1, t_ones, h_ones, cond, return_v=False,
+                                                      detach_time_cond=False)
                 # Single-step prediction: x_pred = z_1 - u_inf
                 x_pred = z_1 - u_inf
-                inf_mse = ((x_pred - actions.float()) ** 2 * valid_mask.float()).sum() / valid_mask.float().sum().clamp(min=1)
+                inf_mse = ((x_pred - actions.to(dtype=default_dtype)) ** 2 * valid_mask.float()).sum() / valid_mask.float().sum().clamp(min=1)
                 u_inf_norm = u_inf.flatten(1).norm(dim=1).mean()
                 inference_diag = {
                     "diag/inference_mse": inf_mse.item(),
