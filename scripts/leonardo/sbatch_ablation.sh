@@ -17,10 +17,10 @@
 set -euo pipefail
 
 # --- Defaults (override via env) ---
-MAX_STEPS="${MAX_STEPS:-15000}"
+MAX_STEPS="${MAX_STEPS:-11000}"
 EVAL_EVERY="${EVAL_EVERY:-5000}"
 SAVE_EVERY="${SAVE_EVERY:-5000}"
-WALL_TIME="${WALL_TIME:-08:00:00}"
+WALL_TIME="${WALL_TIME:-03:00:00}"
 
 # --- Paths ---
 if [ -z "${LEONARDO_FAST:-}" ] || [ -z "${LEONARDO_WORK:-}" ]; then
@@ -47,6 +47,8 @@ echo ""
 
 JOB_SCRIPT_DIR="${OUTPUT_DIR}/ablation_scripts"
 mkdir -p "${JOB_SCRIPT_DIR}"
+
+PREV_JOB_ID=""
 
 for entry in "${ABLATIONS[@]}"; do
     IFS='|' read -r NAME MAX_DUDT NORM_EPS <<< "$entry"
@@ -126,9 +128,17 @@ python -m accelerate.commands.launch --num_processes 4 \
     trainer.agent.agent.norm_eps=${NORM_EPS}
 EOF
 
-    sbatch "${JOB_SCRIPT}"
+    # Chain jobs sequentially: each waits for the previous to finish
+    if [ -z "${PREV_JOB_ID}" ]; then
+        PREV_JOB_ID=$(sbatch --parsable "${JOB_SCRIPT}")
+    else
+        PREV_JOB_ID=$(sbatch --parsable --dependency=afterany:${PREV_JOB_ID} "${JOB_SCRIPT}")
+    fi
+
+    echo "  -> Job ID: ${PREV_JOB_ID}"
 
 done
 
 echo ""
-echo "All ${#ABLATIONS[@]} jobs submitted. Use 'squeue -u \$USER' to monitor."
+echo "All ${#ABLATIONS[@]} jobs submitted sequentially (chained via dependencies)."
+echo "Use 'squeue -u \$USER' to monitor."
