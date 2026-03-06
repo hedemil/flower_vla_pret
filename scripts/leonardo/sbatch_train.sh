@@ -14,7 +14,7 @@
 #   $WORK — venv, datasets, HF cache (large, read-heavy)
 # =============================================================================
 
-#SBATCH --job-name=flowervla
+#SBATCH --job-name=flowervla_abl_
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -109,6 +109,24 @@ for ds in libero_10_no_noops libero_goal_no_noops; do
         echo "WARNING: No tfrecord files found for ${ds}"
     fi
 done
+# --- Training hyperparameters ---
+MAX_STEPS=11000
+EVAL_EVERY=5000
+MAX_DUDT_NORM=50.0
+NORM_EPS=0.01
+
+# --- Ablation grid (Phase 1) ---
+# Format: "name|max_dudt_norm|norm_eps"
+ABLATIONS=(
+    "A1_baseline|50.0|0.01"
+    "A2_noclip|1e10|0.01"
+    "A3_bigeps|50.0|1.0"
+    "A4_noclip_bigeps|1e10|1.0"
+)
+echo "=== iMF Ablation Grid (Phase 1) ==="
+echo "Steps: ${MAX_STEPS}, Eval every: ${EVAL_EVERY}, Max dudt norm: ${MAX_DUDT_NORM}, Norm eps: ${NORM_EPS}"
+echo ""
+
 
 # --- Diagnostics ---
 echo "=== FlowerVLA Training on LEONARDO ==="
@@ -134,5 +152,9 @@ python -m accelerate.commands.launch --num_processes 4 \
     wandb.name=meanflower_${SLURM_JOB_ID}_flower_eef_mix_IMF \
     wandb.entity=null \
     wandb.mode=offline \
+    trainer.agent.agent.max_dudt_norm=${MAX_DUDT_NORM} \
+    trainer.agent.agent.norm_eps=${NORM_EPS} \
+    max_train_steps=${MAX_STEPS} \
+    eval_every_n_steps=${EVAL_EVERY} \
     # +continue_training=/leonardo_scratch/fast/AIFAC_P01_047/project/output/checkpoints/runs/2026-02-27/09-40-45/checkpoint_20000 \
     # +step=20000
