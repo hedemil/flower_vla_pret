@@ -60,7 +60,8 @@ class AccelerateTrainer:
         beta_vlm_1: float = 0.9,
         beta_vlm_2: float = 0.999,
         use_torch_compile: bool = False,
-        use_lr_scheduler: bool = True
+        use_lr_scheduler: bool = True,
+        early_stopping_patience: int = 0
     ):
         # Store configuration
         self.max_train_steps = int(max_train_steps)
@@ -68,6 +69,9 @@ class AccelerateTrainer:
         self.eval_every_n_steps = eval_every_n_steps
         self.use_ema = use_ema
         self.weight_decay = weight_decay
+        self.early_stopping_patience = early_stopping_patience
+        self.best_val_loss = float('inf')
+        self.patience_counter = 0
         self.decay = decay
         self.rampup_ratio = rampup_ratio
         self.use_torch_compile = use_torch_compile
@@ -326,6 +330,12 @@ class AccelerateTrainer:
                     )
                     self.accelerator.wait_for_everyone()
 
+                    # Early stopping check
+                    if self.early_stopping_patience > 0 and self.patience_counter >= self.early_stopping_patience:
+                        if self.accelerator.is_main_process:
+                            log.info(f"Early stopping at step {self.global_step}: no improvement for {self.patience_counter} evals")
+                        break
+
                 # Training step
                 try:
                     batch = next(train_generator)
@@ -571,6 +581,18 @@ class AccelerateTrainer:
             if avg_test_mse < best_test_mse:
                 best_test_mse = avg_test_mse
                 log.info('New best test loss!')
+
+        # Best model saving + early stopping tracking (all ranks participate in save)
+        if avg_test_mse < self.best_val_loss:
+            self.best_val_loss = avg_test_mse
+            self.patience_counter = 0
+            self.store_model_weights(self.working_dir, "best_")
+            if self.accelerator.is_main_process:
+                log.info(f"Saved best model at step {self.global_step} with val_loss={avg_test_mse:.6f}")
+        else:
+            self.patience_counter += 1
+            if self.accelerator.is_main_process:
+                log.info(f"No improvement for {self.patience_counter} eval(s) (best={self.best_val_loss:.6f})")
 
         self.compute_and_log_metrics()
 

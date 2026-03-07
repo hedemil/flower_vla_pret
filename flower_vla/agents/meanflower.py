@@ -591,6 +591,7 @@ class MeanFlowerVLA(nn.Module):
             diff = u_pred - u_tgt
             diff = diff * valid_mask.to(dtype=default_dtype)
             loss_per_sample = (diff ** 2).sum(dim=(1, 2))
+            raw_mse_per_sample = loss_per_sample.detach()
 
             # Adaptive weighting: normalizes loss to ~1.0 per sample.
             # This is critical for MeanFlow stability — without it, the
@@ -611,7 +612,7 @@ class MeanFlowerVLA(nn.Module):
             valid_utgt = u_tgt[valid_mask]
             v_loss = ((valid_u - valid_v) ** 2).mean()
             # Raw MSE before adaptive normalization — the real convergence signal
-            raw_mse = loss_per_sample.mean()
+            raw_mse = raw_mse_per_sample.mean()
             # Track du/dt magnitude — if this vanishes, the model degenerates
             # to standard flow and single-step sampling will fail.
             dudt_norm = dudt[valid_mask].norm(dim=0).mean()
@@ -964,18 +965,35 @@ class MeanFlowerVLA(nn.Module):
         Returns a list of parameter groups.
         """
         no_decay = ['bias', 'LayerNorm', 'layernorm', 'ln', 'norm']
+        decoder_params_set = set()
+        for decoder in self.action_decoders.values():
+            decoder_params_set.update(p for p in decoder.parameters())
+
+        decoder_weight_decay = optimizer_config.get("decoder_weight_decay", optimizer_config["transformer_weight_decay"])
+
         decay_group = []
         no_decay_group = []
+        decoder_decay_group = []
+        decoder_no_decay_group = []
         vlm_params = set(p for p in self.vlm.parameters())
         for name, param in self.named_parameters():
             if param.requires_grad and param.is_leaf and param not in vlm_params:
-                if any(nd in name.lower() for nd in no_decay):
-                    no_decay_group.append(param)
+                is_no_decay = any(nd in name.lower() for nd in no_decay)
+                if param in decoder_params_set:
+                    if is_no_decay:
+                        decoder_no_decay_group.append(param)
+                    else:
+                        decoder_decay_group.append(param)
                 else:
-                    decay_group.append(param)
+                    if is_no_decay:
+                        no_decay_group.append(param)
+                    else:
+                        decay_group.append(param)
         optim_groups = [
             {"params": decay_group, "weight_decay": optimizer_config["transformer_weight_decay"]},
-            {"params": no_decay_group, "weight_decay": 0.0}
+            {"params": no_decay_group, "weight_decay": 0.0},
+            {"params": decoder_decay_group, "weight_decay": decoder_weight_decay},
+            {"params": decoder_no_decay_group, "weight_decay": 0.0},
         ]
         return optim_groups
 

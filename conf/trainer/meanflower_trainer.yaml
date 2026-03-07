@@ -16,20 +16,23 @@ beta_vlm_2: 0.99
 weight_decay:
   transformer_weight_decay: 0.01
   vlm_weight_decay: 0.001
+  decoder_weight_decay: 0.05
+
+early_stopping_patience: 5
 
 dit_lr_scheduler:
   _target_: flower_vla.utils.lr_schedulers.TriStageLRScheduler
-  total_steps: 600000
-  phase_ratio: "(0.01, 0.39, 0.6)"
+  total_steps: 100000
+  phase_ratio: "(0.03, 0.17, 0.8)"
   init_lr_scale: 0.01
   final_lr_scale: 0.01
 
-vlm_lr_scheduler: 
+vlm_lr_scheduler:
   _target_: flower_vla.utils.lr_schedulers.TriStageLRScheduler
   init_lr_scale: 0.001
   final_lr_scale: 0.5
-  phase_ratio: "(0.1, 0.89, 0.01)"
-  total_steps: 400000
+  phase_ratio: "(0.05, 0.15, 0.8)"
+  total_steps: 100000
 
 eval_every_n_steps: ${eval_every_n_steps}
 save_every_n_steps: ${save_every_n_steps} 
