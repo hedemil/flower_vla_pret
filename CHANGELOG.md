@@ -1,5 +1,36 @@
 # MeanFlower VLA - Changelog
 
+## [2026-03-07] Fix overfitting: LR decay, early stopping, best model saving
+
+**Problem**: Training metrics (v_loss, cos_u_v) converge well, but val_loss diverges after step 20k (0.0799 → 0.2706 by 50k). The model overfits because LR never decays during training and there is no mechanism to stop or save the best checkpoint.
+
+**Root causes**:
+
+1. **LR never decays.** TriStageLRScheduler had `total_steps=600k` with `phase_ratio=(0.01, 0.39, 0.6)`, meaning warmup ends at 6k and hold continues until 240k. At 50k steps the model is still at full LR (1e-4).
+2. **No early stopping.** Training runs for `max_train_steps` regardless of val_loss.
+3. **No best model saving.** Only periodic checkpoints every 10k steps — best model may be overwritten.
+4. **MeanFlowDecoder has no regularization.** Dropout cannot be used (breaks JVP), and weight decay was the same low 0.01 as the transformer.
+
+**Config changes** (`conf/trainer/meanflower_trainer.yaml`):
+
+| Parameter | Before | After | Rationale |
+|-----------|--------|-------|-----------|
+| DiT LR total_steps | 600000 | **100000** | Start decay much sooner to match best val_loss at ~20k |
+| DiT LR phase_ratio | (0.01, 0.39, 0.6) | **(0.03, 0.17, 0.8)** | Warmup 0→3k, hold 3k→20k, cosine decay 20k→100k |
+| VLM LR total_steps | 400000 | **100000** | Proportional adjustment |
+| VLM LR phase_ratio | (0.1, 0.89, 0.01) | **(0.05, 0.15, 0.8)** | Warmup 0→5k, hold 5k→20k, cosine decay 20k→100k |
+| decoder_weight_decay | (none) | **0.05** | Higher regularization for decoder (only lever since dropout breaks JVP) |
+| early_stopping_patience | (none) | **5** | Stop after 5 evals (50k steps) without val_loss improvement |
+
+**Code changes:**
+
+| Change | File | Rationale |
+|--------|------|-----------|
+| Early stopping + best model saving | `flower_trainer.py` | Track `best_val_loss` and `patience_counter`. Save best checkpoint on improvement, break loop when patience exhausted. |
+| Decoder weight decay param group | `meanflower.py` | Separate `action_decoders` params into own optimizer group with `decoder_weight_decay` (0.05 vs 0.01). |
+
+**Files changed**: `conf/trainer/meanflower_trainer.yaml`, `flower_vla/trainers/flower_trainer.py`, `flower_vla/agents/meanflower.py`
+
 ## [2026-02-28] Fix MeanFlow training instability
 
 **Problem**: Training collapses after ~20k steps. Val MSE: 0.127 (20k) → 0.562 (30k), a 4.4x regression. The MeanFlow loss is self-referential (`u_tgt = v - h * du/dt`), making it sensitive to hyperparameters that standard rectified flow tolerates.
