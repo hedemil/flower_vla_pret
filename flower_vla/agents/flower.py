@@ -493,18 +493,23 @@ class FlowerVLA(nn.Module):
                 adim = self.action_space_index.get_action_dim(action_idx)
                 mask_expanded = mask.view(-1, 1, 1).expand(-1, actions.size(1), adim).to(device)
                 valid_mask[mask, :, :adim] = mask_expanded[mask]
-        diff = (z1 - actions) - vtheta
+        target_v = z1 - actions
+        diff = target_v - vtheta
         valid_diff = diff[valid_mask]
         loss = (valid_diff ** 2).mean()
+        valid_vtheta = vtheta[valid_mask]
+        valid_target = target_v[valid_mask]
         losses_dict = {
+            "raw_mse": loss.item(),
             "diff_min": valid_diff.min().item(),
             "diff_max": valid_diff.max().item(),
             "diff_mean": valid_diff.mean().item(),
-            "loss": loss.item(),
+            "vtheta_norm": valid_vtheta.norm().item(),
+            "target_v_norm": valid_target.norm().item(),
+            "cos_v_vtgt": F.cosine_similarity(
+                valid_vtheta.unsqueeze(0), valid_target.unsqueeze(0)
+            ).item(),
         }
-        if hasattr(self, 'accelerator') and self.accelerator is not None and wandb.run is not None:
-            if self.accelerator.is_main_process:
-                wandb.log(losses_dict)
         return loss, losses_dict
 
     # === Sampling Methods ===

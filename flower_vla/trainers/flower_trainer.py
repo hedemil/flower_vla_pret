@@ -1,6 +1,7 @@
 import os
+import gc
 import logging
-import copy 
+import copy
 from collections import OrderedDict
 import traceback
 
@@ -59,7 +60,8 @@ class AccelerateTrainer:
         beta_vlm_1: float = 0.9,
         beta_vlm_2: float = 0.999,
         use_torch_compile: bool = False,
-        use_lr_scheduler: bool = True
+        use_lr_scheduler: bool = True,
+        early_stopping_patience: int = 0
     ):
         # Store configuration
         self.max_train_steps = int(max_train_steps)
@@ -70,6 +72,9 @@ class AccelerateTrainer:
         self.decay = decay
         self.rampup_ratio = rampup_ratio
         self.use_torch_compile = use_torch_compile
+        self.early_stopping_patience = early_stopping_patience
+        self.best_val_loss = float('inf')
+        self.patience_counter = 0
         self.update_ema_every_n_steps = update_ema_every_n_steps
         self.save_every_n_steps = save_every_n_steps
         self.batch_size = batch_size
@@ -325,6 +330,12 @@ class AccelerateTrainer:
                     )
                     self.accelerator.wait_for_everyone()
 
+                    # Early stopping check
+                    if self.early_stopping_patience > 0 and self.patience_counter >= self.early_stopping_patience:
+                        if self.accelerator.is_main_process:
+                            log.info(f"Early stopping at step {self.global_step}: no improvement for {self.patience_counter} evals")
+                        break
+
                 # Training step
                 try:
                     batch = next(train_generator)
@@ -335,8 +346,15 @@ class AccelerateTrainer:
                 batch_loss = self.train_step(batch)
 
                 # Logging
+                if step % 1000 == 0:
+                    gc.collect()
+                    torch.cuda.empty_cache()
                 if step % 1000 == 0 and self.accelerator.is_main_process:
-                    log.info(f"Step {self.global_step}: Mean batch loss MSE is {batch_loss}")
+                    losses_info = self.agent.module.agent.losses_dict
+                    raw_mse = losses_info.get("raw_mse", float("nan"))
+                    cos_v_vtgt = losses_info.get("cos_v_vtgt", float("nan"))
+                    vtheta_norm = losses_info.get("vtheta_norm", float("nan"))
+                    log.info(f"Step {self.global_step}: raw_mse={raw_mse:.6f}, cos_v_vtgt={cos_v_vtgt:.4f}, vtheta_norm={vtheta_norm:.4f}")
 
                 if step % 100 == 0 and wandb.run is not None and self.accelerator.is_main_process:
                     # Get metrics from agent
@@ -558,7 +576,23 @@ class AccelerateTrainer:
                 best_test_mse = avg_test_mse
                 log.info('New best test loss!')
 
+        # Best model saving + early stopping tracking
+        if avg_test_mse < self.best_val_loss:
+            self.best_val_loss = avg_test_mse
+            self.patience_counter = 0
+            self.store_model_weights(self.working_dir, "best_")
+            if self.accelerator.is_main_process:
+                log.info(f"Saved best model at step {self.global_step} with val_loss={avg_test_mse:.6f}")
+        else:
+            self.patience_counter += 1
+            if self.accelerator.is_main_process:
+                log.info(f"No improvement for {self.patience_counter} eval(s) (best={self.best_val_loss:.6f})")
+
         self.compute_and_log_metrics()
+
+        # Free GPU memory after evaluation
+        torch.cuda.empty_cache()
+
         return avg_test_mse, best_test_mse
 
     def load_pretrained_model(self, weights_path: str, ema_name: str = None) -> None:
