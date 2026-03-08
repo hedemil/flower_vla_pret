@@ -536,8 +536,8 @@ class MeanFlowerVLA(nn.Module):
         # Define network function for JVP
         def u_func(z_input, t_input, r_input):
             h_input = t_input - r_input
-            t_flat = t_input.view(-1)
-            h_flat = h_input.view(-1)
+            t_flat = t_input.detach().view(-1)   # zero tangent through t_embedder/adaLN
+            h_flat = h_input.detach().view(-1)   # zero tangent through h_embedder/decoder
             return self.dit_forward_meanflow(z_input, t_flat, h_flat, cond)
 
         # Tangent vectors for JVP (float32 to match)
