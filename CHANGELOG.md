@@ -1,5 +1,34 @@
 # MeanFlower VLA - Changelog
 
+## [2026-03-09] Detach t/h conditioning in JVP, zero-init, increase weight decay
+
+**Problem**: Mean Flow training metrics (raw_mse ~1000+, cos_u_utgt ~0.3, dudt_norm ~2000-5000) were inflated because the JVP tangent flowed through the sinusoidal t-embedder and h-embedder, creating enormous ∂u/∂t that dominated the self-consistency target. Val_loss was competitive (0.0659 vs FLOWER 0.0672 at 20k) but the model overfitted after 10k steps (0.1178 → 0.1691 at 20k).
+
+**Root causes**:
+
+1. **JVP tangent through t/h embedders.** The `u_func` passed raw `t_input` and `h_input` to the network, so `torch.func.jvp` computed `du/dt` including the sinusoidal embedder path — not just the physically meaningful `∂u/∂z · v` term.
+2. **Non-zero initialization.** adaLN modulation and MeanFlowDecoder output layers had random init, so blocks were not identity and decoder output was non-zero at step 0.
+3. **Weak transformer weight decay.** 0.01 vs FLOWER's 0.1 — insufficient regularization without dropout.
+
+**Results after fix** (at 4k steps): dudt_norm 244 (was 2000-5000), cos_u_utgt 0.89 (was 0.3), raw_mse 25.8 (was 1000+).
+
+**Code changes:**
+
+| Change | File | Rationale |
+|--------|------|-----------|
+| Detach `t_input` and `h_input` in `u_func` | `meanflower.py` | Zero JVP tangent through t/h embedders, leaving only ∂u/∂z · v |
+| Zero-init `FlowBlock.adaLN_modulation[-1]` | `meanflower_transformers.py` | Blocks start as identity (shift=0, scale=0, gate=0) |
+| Zero-init `MeanFlowDecoder.decoder[-1]` | `meanflower_transformers.py` | u_pred = 0 at initialization |
+| Dtype-aware fill value in cross-attention | `meanflower_transformers.py` | Consistent bf16-safe `-inf` masking |
+
+**Config changes** (`conf/trainer/meanflower_trainer.yaml`):
+
+| Parameter | Before | After | Rationale |
+|-----------|--------|-------|-----------|
+| transformer_weight_decay | 0.01 | **0.1** | Match FLOWER baseline for proper regularization |
+
+**Files changed**: `flower_vla/agents/meanflower.py`, `flower_vla/agents/networks/meanflower_transformers.py`, `conf/trainer/meanflower_trainer.yaml`
+
 ## [2026-03-07] Fix overfitting: LR decay, early stopping, best model saving
 
 **Problem**: Training metrics (v_loss, cos_u_v) converge well, but val_loss diverges after step 20k (0.0799 → 0.2706 by 50k). The model overfits because LR never decays during training and there is no mechanism to stop or save the best checkpoint.
