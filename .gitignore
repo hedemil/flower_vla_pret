@@ -187,3 +187,9 @@ cython_debug/
 checkpoints/
 # datasets/
 
+# Errors and outputs
+*.err                                                                                                                                                                                                                                                 
+*.out
+
+# Pdfs
+*.pdf

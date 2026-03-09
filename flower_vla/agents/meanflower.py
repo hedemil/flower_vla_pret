@@ -846,26 +846,22 @@ class MeanFlowerVLA(nn.Module):
                                              device=self.device, dtype=target_actions.dtype)
                     noise_actions[mask, :, :adim] = rand_slice
             action_pred = self.sample_actions(noise_actions, obs_features, inference=True)
-            losses_dict = {}
-            total_loss = torch.tensor(0.0, device=self.device)
-            num_action_types = 0
+            # Per-sample MSE so DatasetMetricsTracker can group by dataset
+            B = target_actions.shape[0]
+            per_sample_loss = torch.zeros(B, device=self.device)
             for action_name, action_idx in self.action_space_index.action_spaces.items():
                 mask = (action_type == action_idx)
                 if mask.any():
                     adim = self.action_space_index.get_action_dim(action_idx)
-                    space_loss = F.mse_loss(
+                    per_sample_loss[mask] = F.mse_loss(
                         action_pred[mask, :, :adim],
                         target_actions[mask, :, :adim],
-                        reduction='mean'
-                    )
-                    losses_dict[f"val_loss_{action_name}"] = space_loss.item()
-                    total_loss += space_loss
-                    num_action_types += 1
-            avg_loss = total_loss
+                        reduction='none'
+                    ).mean(dim=(1, 2))
             return {
-                "loss": avg_loss.detach(),
-                "losses": losses_dict,
-                "dataset_index": batch['task'].get('dataset_index', torch.zeros(action_pred.shape[0], device=self.device)).detach()
+                "loss": per_sample_loss.detach(),
+                "losses": {},
+                "dataset_index": batch['task'].get('dataset_index', torch.zeros(B, device=self.device)).detach()
             }
 
     def dit_forward_meanflow(self, z: torch.Tensor, t: torch.Tensor, h: torch.Tensor, cond_dict: dict) -> torch.Tensor:

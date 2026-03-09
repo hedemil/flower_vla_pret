@@ -25,7 +25,7 @@ agent:
   sampling_type: 'uniform'
   second_view_key: 'image_secondary'
   multistep: ${act_seq_len}
-  num_sampling_steps: 4
+  num_sampling_steps: 1
   lowdim_obs_dim: ${obs_dim}
   action_dim: ${act_dim}
   act_window_size: ${act_seq_len}
@@ -33,12 +33,12 @@ agent:
   use_proprio: True
   # flow configuration
   action_type_adaln: True
-  dit_dim: 768 # 1024
+  dit_dim: 1024
   n_heads: 8 
   n_layers: 12
-  attn_pdrop: 0.0
-  resid_pdrop: 0.0
-  mlp_pdrop: 0.0
+  attn_pdrop: 0.3
+  resid_pdrop: 0.1
+  mlp_pdrop: 0.1
   use_cross_attn: True
   use_adaln_cond: False
   use_rope: True
