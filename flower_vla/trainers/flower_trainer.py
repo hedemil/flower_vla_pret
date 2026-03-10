@@ -92,7 +92,8 @@ class AccelerateTrainer:
         self.setup_optimization(dit_lr_scheduler, vlm_lr_scheduler, learning_rate_dit, learning_rate_vlm,
                                   betas_dit=(beta_dit_1, beta_dit_2), betas_vlm=(beta_vlm_1, beta_vlm_2))
         self.log_model_stats()
-        self.metrics_tracker = DatasetMetricsTracker(DATASET_INDEX_MAPPING, self.accelerator)
+        self.metrics_tracker = DatasetMetricsTracker(DATASET_INDEX_MAPPING, self.accelerator, prefix="val_loss")
+        self.online_metrics_tracker = DatasetMetricsTracker(DATASET_INDEX_MAPPING, self.accelerator, prefix="val_loss_online")
 
     def setup_core_components(
         self, accelerator, datamodule, agent, single_loader,
@@ -451,25 +452,25 @@ class AccelerateTrainer:
         self.global_step += 1
         return loss.item()
 
-    def evaluate_step(self, batch: dict):
+    def evaluate_step(self, batch: dict, use_ema: bool = True):
         # Store original model for later
         original_model = None
 
-        if self.use_ema and self.ema is not None:
+        if use_ema and self.use_ema and self.ema is not None:
             # Use EMA weights for evaluation
             original_model = self.agent
             self.agent = self.ema.to(torch.bfloat16)
-        
+
         self.agent.eval()
-        
+
         with torch.no_grad():
             with torch.autocast('cuda', dtype=torch.bfloat16):
                 output = self.agent(batch, Mode.EVALUATION)
-        
+
         # Switch back to original model if we used EMA
         if original_model is not None:
             self.agent = original_model
-        
+
         return output
 
     def _should_save_checkpoint(self, step: int) -> bool:
@@ -558,17 +559,24 @@ class AccelerateTrainer:
                 generator = iter(self.val_loader if self.val_loader else self.train_dataloader)
                 batch = next(generator)
 
-            eval_dict = self.evaluate_step(batch)
+            # EMA eval (used for best-model saving / early stopping)
+            eval_dict = self.evaluate_step(batch, use_ema=True)
             eval_loss = eval_dict['loss'].mean().item() if torch.is_tensor(eval_dict['loss']) else eval_dict['loss']
             test_losses.append(eval_loss)
 
-            # Move to CPU before tracking to avoid GPU memory accumulation
             self.metrics_tracker.update(
                 losses=eval_dict['loss'].detach().cpu(),
                 dataset_indices=eval_dict['dataset_index'].detach().cpu()
             )
-            # Explicitly delete large tensors we don't need
             del eval_dict
+
+            # Online (training) model eval
+            online_dict = self.evaluate_step(batch, use_ema=False)
+            self.online_metrics_tracker.update(
+                losses=online_dict['loss'].detach().cpu(),
+                dataset_indices=online_dict['dataset_index'].detach().cpu()
+            )
+            del online_dict
 
         # Gather and average losses
         gathered_losses = self.accelerator.gather(torch.tensor(test_losses, device=self.accelerator.device))
@@ -720,15 +728,17 @@ class AccelerateTrainer:
         self.accelerator.wait_for_everyone()
         # Compute metrics - this will handle gathering across processes
         individual_metrics = self.metrics_tracker.compute_metrics()
+        online_metrics = self.online_metrics_tracker.compute_metrics()
         print('done computing metrics')
         # Only log on main process
         if wandb.run is not None and self.accelerator.is_main_process:
+            all_metrics = {**individual_metrics, **online_metrics}
             self.accelerator.log(
-                individual_metrics,
+                all_metrics,
                 # step=self.global_step + 1
             )
-            print("Logged metrics:", individual_metrics)
-        
+            print("Logged metrics:", all_metrics)
+
         # Make sure all processes wait before continuing
         self.accelerator.wait_for_everyone()
 

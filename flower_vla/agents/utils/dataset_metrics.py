@@ -6,9 +6,10 @@ import wandb
 
 # First, the shared metrics tracker class
 class DatasetMetricsTracker:
-    def __init__(self, dataset_mapping, accelerator):
+    def __init__(self, dataset_mapping, accelerator, prefix="val_loss"):
         self.dataset_mapping = dataset_mapping
         self.accelerator = accelerator
+        self.prefix = prefix
         self.reset()
         
     def reset(self):
@@ -39,9 +40,9 @@ class DatasetMetricsTracker:
                     mask = gathered_indices == idx
                     losses = gathered_losses[mask]
                     if len(losses) > 0:
-                        metrics[f"val_loss/{self.dataset_mapping[idx.item()]}"] = losses.mean().item()
-                
-                metrics["val_loss/overall"] = gathered_losses.mean().item()
+                        metrics[f"{self.prefix}/{self.dataset_mapping[idx.item()]}"] = losses.mean().item()
+
+                metrics[f"{self.prefix}/overall"] = gathered_losses.mean().item()
                     
         except Exception as e:
             print(f"Error in compute_metrics: {e}")
