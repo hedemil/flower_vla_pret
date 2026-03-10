@@ -1,5 +1,43 @@
 # MeanFlower VLA - Changelog
 
+## [2026-03-10] Fix inverted ratio semantics, align with py-meanflow reference
+
+**Problem**: Training metrics (raw_mse, cos_u_utgt) kept improving but val_loss **increased** over training: 0.175 (10k) → 0.271 (20k) → 0.313 (30k). Per-dataset val_losses were also identical across all tasks (~0.123) due to a separate metrics bug.
+
+**Root causes**:
+
+1. **Inverted `data_proportion` semantics.** Our `data_proportion=0.75` meant 75% of samples got `r=t` (h=0, instantaneous velocity) and only 25% were integral (h>0). The py-meanflow reference's `ratio=0.75` means the **opposite**: 75% integral, 25% velocity. The model was trained almost exclusively at h≈0 but evaluated with single-step sampling at h=1 — completely out-of-distribution. As the model specialized for h≈0 during training, its h=1 predictions degraded.
+2. **Adaptive loss too aggressive.** `norm_p=1.0` with `norm_eps=0.01` made `loss/(loss+0.01)^1.0 ≈ 1.0` for all samples, flattening all gradient signals. Reference uses `norm_p=0.75`, `norm_eps=0.001` for softer normalization that preserves relative loss magnitudes.
+3. **Per-dataset val_loss bug.** `validation_step` returned a scalar loss that got broadcast to all samples in `DatasetMetricsTracker`, making all per-dataset losses identical.
+
+**Code changes:**
+
+| Change | File | Rationale |
+|--------|------|-----------|
+| Rename `data_proportion` → `ratio`, flip semantics | `meanflower.py` | Match py-meanflow reference: `ratio=0.75` = 75% integral (h>0), 25% velocity (h=0) |
+| Stochastic per-sample masking in `sample_tr` | `meanflower.py` | Reference uses `torch.rand` per sample, not deterministic first-N |
+| `norm_p`: 1.0 → **0.75**, `norm_eps`: 0.01 → **0.001** | `meanflower.py` | Match CIFAR10 reference config for softer adaptive weighting |
+| Return per-sample loss from `validation_step` | `meanflower.py`, `flower.py` | Fix per-dataset metrics — `DatasetMetricsTracker` needs `[B]` losses, not scalar |
+
+**Config changes** (`conf/trainer/agent/meanflower_vla.yaml`):
+
+| Parameter | Before | After | Rationale |
+|-----------|--------|-------|-----------|
+| `data_proportion: 0.75` | 75% velocity, 25% integral | **`ratio: 0.75`** = 75% integral, 25% velocity | Match py-meanflow CIFAR10 config (closest dataset size) |
+
+**Reference comparison** (py-meanflow CIFAR10 v0):
+
+| Parameter | Reference | Ours (after) |
+|-----------|-----------|-------------|
+| ratio (integral %) | 0.75 (75%) | 0.75 (75%) |
+| norm_p | 0.75 | 0.75 |
+| norm_eps | 0.001 | 0.001 |
+| ema_decay | 0.9999 | 0.999 |
+| P_mean | -2.0 | -0.4 |
+| P_std | 2.0 | 1.0 |
+
+**Files changed**: `flower_vla/agents/meanflower.py`, `flower_vla/agents/flower.py`, `conf/trainer/agent/meanflower_vla.yaml`
+
 ## [2026-03-09] Detach t/h conditioning in JVP, zero-init, increase weight decay
 
 **Problem**: Mean Flow training metrics (raw_mse ~1000+, cos_u_utgt ~0.3, dudt_norm ~2000-5000) were inflated because the JVP tangent flowed through the sinusoidal t-embedder and h-embedder, creating enormous ∂u/∂t that dominated the self-consistency target. Val_loss was competitive (0.0659 vs FLOWER 0.0672 at 20k) but the model overfitted after 10k steps (0.1178 → 0.1691 at 20k).

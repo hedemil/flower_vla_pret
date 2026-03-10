@@ -86,7 +86,7 @@ class MeanFlowerVLA(nn.Module):
         noise_dist: str = 'logit_normal',
         P_mean: float = -0.4,
         P_std: float = 1.0,
-        data_proportion: float = 1.0,
+        ratio: float = 0.75,
     ):
         """
         Initializes the MeanFlowerVLA agent that combines a pretrained vision–language model
@@ -146,7 +146,7 @@ class MeanFlowerVLA(nn.Module):
         )
         # Mean Flow specific parameters
         self.noise_dist = noise_dist
-        self.data_proportion = data_proportion
+        self.ratio = ratio
         self.register_buffer(
             "P_mean",
             torch.tensor(P_mean, dtype=torch.float32)
@@ -598,8 +598,8 @@ class MeanFlowerVLA(nn.Module):
             # self-referential target u_tgt = v - h*du/dt creates a positive
             # feedback loop where large du/dt → large loss → large gradients
             # → even larger du/dt, causing divergence.
-            norm_eps = 0.01
-            norm_p = 1.0
+            norm_eps = 0.001
+            norm_p = 0.75
             adp_wt = (loss_per_sample.detach() + norm_eps) ** norm_p
             loss_per_sample = loss_per_sample / adp_wt
 
@@ -711,26 +711,27 @@ class MeanFlowerVLA(nn.Module):
     def sample_tr(self, b: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Sample timesteps t and r with constraint t >= r.
-        For data_proportion of samples, set r = t (instantaneous velocity).
+        `ratio` fraction of samples keep r != t (integral/mean-flow samples).
+        The remaining (1 - ratio) fraction get r = t (instantaneous velocity).
+        Matches py-meanflow reference: ratio=0.75 → 75% integral, 25% velocity.
 
         Returns:
-            t: Sampled timesteps [B, 1, 1]
-            r: Sampled timesteps [B, 1, 1]
+            t: Sampled timesteps [B, 1, 1, 1]
+            r: Sampled timesteps [B, 1, 1, 1]
         """
-        dtype = next(self.parameters()).dtype # Get model dtype (bf16)
+        dtype = next(self.parameters()).dtype
 
-        # Ensure these are cast
         t = self.noise_distribution()(b).to(device=self.device, dtype=dtype)
         r = self.noise_distribution()(b).to(device=self.device, dtype=dtype)
-        
+
         # Ensure t >= r element-wise
         t, r = torch.maximum(t, r), torch.minimum(t, r)
 
-        data_size = int(b * self.data_proportion)
-        zero_mask = torch.arange(b, device=t.device) < data_size
-        zero_mask = zero_mask.view(b, 1, 1, 1)
+        # With probability (1 - ratio), collapse to velocity (r = t)
+        prob = torch.rand(b, 1, 1, 1, device=self.device)
+        velocity_mask = prob < (1 - self.ratio)
+        r = torch.where(velocity_mask, t, r)
 
-        r = torch.where(zero_mask, t, r)
         return t, r
 
     # === Sampling Methods ===
