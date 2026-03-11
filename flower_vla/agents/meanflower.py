@@ -865,6 +865,78 @@ class MeanFlowerVLA(nn.Module):
                 "dataset_index": batch['task'].get('dataset_index', torch.zeros(B, device=self.device)).detach()
             }
 
+    def meanflow_eval_loss_step(self, batch: dict) -> dict:
+        """Wrapper for meanflow eval loss: encodes observations then computes v_loss."""
+        self.eval()
+        with torch.no_grad():
+            target_actions = batch[self.target_modality]
+            if len(target_actions.shape) == 4:
+                target_actions = target_actions.squeeze(1)
+            obs_features = self.encode_observations(batch)
+            result = self.meanflow_eval_loss(obs_features, target_actions)
+            B = target_actions.shape[0]
+            result['dataset_index'] = batch['task'].get(
+                'dataset_index', torch.zeros(B, device=self.device)
+            ).detach()
+            return result
+
+    @torch.no_grad()
+    def meanflow_eval_loss(self, cond: dict, actions: torch.Tensor) -> dict:
+        """
+        Compute ||u(z_t, t, h) - v||² during eval (no JVP needed).
+        Matches the setup of meanflow_loss lines 498-526 but only does a single forward pass.
+        """
+        default_dtype = next(self.parameters()).dtype
+        action_type = cond['action_type']
+        if len(actions.shape) == 4:
+            actions = actions.squeeze(1)
+        b = actions.size(0)
+        device = actions.device
+        actions = actions.to(dtype=default_dtype)
+
+        # Sample t and r
+        t, r = self.sample_tr(b)
+
+        texp = t.view([b] + [1] * (actions.dim() - 1)).to(dtype=default_dtype)
+
+        # Sample noise per action space
+        e = torch.zeros_like(actions)
+        for action_name, action_idx in self.action_space_index.action_spaces.items():
+            mask = (action_type == action_idx)
+            if mask.any():
+                adim = self.action_space_index.get_action_dim(action_idx)
+                noise_slice = torch.randn(
+                    (mask.sum(), actions.size(1), adim),
+                    dtype=actions.dtype, device=device
+                )
+                e[mask, :, :adim] = noise_slice
+
+        z = (1 - texp) * actions + texp * e
+        v = e - actions  # target velocity
+
+        # Compute h = t - r
+        h_val = t - r
+        t_flat = t.view(-1)
+        h_flat = h_val.view(-1)
+
+        # Single forward pass
+        with torch.autocast('cuda', dtype=torch.bfloat16):
+            u_pred = self.dit_forward_meanflow(z, t_flat, h_flat, cond)
+
+        # Per-sample ||u - v||² over valid action dims
+        per_sample_loss = torch.zeros(b, device=device)
+        for action_name, action_idx in self.action_space_index.action_spaces.items():
+            mask = (action_type == action_idx)
+            if mask.any():
+                adim = self.action_space_index.get_action_dim(action_idx)
+                per_sample_loss[mask] = F.mse_loss(
+                    u_pred[mask, :, :adim].float(),
+                    v[mask, :, :adim].float(),
+                    reduction='none'
+                ).mean(dim=(1, 2))
+
+        return {"loss": per_sample_loss.detach()}
+
     def dit_forward_meanflow(self, z: torch.Tensor, t: torch.Tensor, h: torch.Tensor, cond_dict: dict) -> torch.Tensor:
         """
         Forward pass through the DiT blocks using MeanFlowDecoder.

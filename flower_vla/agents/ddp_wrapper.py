@@ -16,6 +16,7 @@ class Mode(IntEnum):
     INFERENCE = 1
     TRAINING = 2
     EVALUATION = 3
+    EVALUATION_MF = 4
 
 
 class DDPAgentWrapper(nn.Module):
@@ -95,7 +96,7 @@ class DDPAgentWrapper(nn.Module):
             loss depends on model
             """
             assert self.target_modality in batch, "Error, target_modality not found in batch! Hydra-configs might be wrong!"
-            if self.discard_action_history:
+            if self.discard_action_history and batch[self.target_modality].dim() == 4:
                 batch[self.target_modality] = batch[self.target_modality][:, -1]
             self.agent.train()
             # calculate loss with training_step method
@@ -107,11 +108,17 @@ class DDPAgentWrapper(nn.Module):
             Standard MSE Loss
             """
             assert self.target_modality in batch, "Error, target_modality not found in batch! Hydra-configs might be wrong!"
-            if self.discard_action_history:
+            if self.discard_action_history and batch[self.target_modality].dim() == 4:
                 batch[self.target_modality] = batch[self.target_modality][:, -1]
             self.agent.eval()
             pred_loss = self.agent.validation_step(batch)
             return pred_loss
+        elif mode == Mode.EVALUATION_MF:
+            assert self.target_modality in batch
+            if self.discard_action_history and batch[self.target_modality].dim() == 4:
+                batch[self.target_modality] = batch[self.target_modality][:, -1]
+            self.agent.eval()
+            return self.agent.meanflow_eval_loss_step(batch)
         else:
             print("Mode is NONE!")
 

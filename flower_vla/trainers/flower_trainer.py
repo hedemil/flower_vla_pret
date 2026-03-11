@@ -94,6 +94,8 @@ class AccelerateTrainer:
         self.log_model_stats()
         self.metrics_tracker = DatasetMetricsTracker(DATASET_INDEX_MAPPING, self.accelerator, prefix="val_loss")
         self.online_metrics_tracker = DatasetMetricsTracker(DATASET_INDEX_MAPPING, self.accelerator, prefix="val_loss_online")
+        self.mf_metrics_tracker = DatasetMetricsTracker(DATASET_INDEX_MAPPING, self.accelerator, prefix="val_vloss")
+        self.mf_online_metrics_tracker = DatasetMetricsTracker(DATASET_INDEX_MAPPING, self.accelerator, prefix="val_vloss_online")
 
     def setup_core_components(
         self, accelerator, datamodule, agent, single_loader,
@@ -452,7 +454,7 @@ class AccelerateTrainer:
         self.global_step += 1
         return loss.item()
 
-    def evaluate_step(self, batch: dict, use_ema: bool = True):
+    def evaluate_step(self, batch: dict, use_ema: bool = True, mode: Mode = Mode.EVALUATION):
         # Store original model for later
         original_model = None
 
@@ -465,7 +467,7 @@ class AccelerateTrainer:
 
         with torch.no_grad():
             with torch.autocast('cuda', dtype=torch.bfloat16):
-                output = self.agent(batch, Mode.EVALUATION)
+                output = self.agent(batch, mode)
 
         # Switch back to original model if we used EMA
         if original_model is not None:
@@ -577,6 +579,22 @@ class AccelerateTrainer:
                 dataset_indices=online_dict['dataset_index'].detach().cpu()
             )
             del online_dict
+
+            # MeanFlow v_loss eval (EMA)
+            mf_dict = self.evaluate_step(batch, use_ema=True, mode=Mode.EVALUATION_MF)
+            self.mf_metrics_tracker.update(
+                losses=mf_dict['loss'].detach().cpu(),
+                dataset_indices=mf_dict['dataset_index'].detach().cpu()
+            )
+            del mf_dict
+
+            # MeanFlow v_loss eval (online)
+            mf_online_dict = self.evaluate_step(batch, use_ema=False, mode=Mode.EVALUATION_MF)
+            self.mf_online_metrics_tracker.update(
+                losses=mf_online_dict['loss'].detach().cpu(),
+                dataset_indices=mf_online_dict['dataset_index'].detach().cpu()
+            )
+            del mf_online_dict
 
         # Gather and average losses
         gathered_losses = self.accelerator.gather(torch.tensor(test_losses, device=self.accelerator.device))
@@ -729,10 +747,12 @@ class AccelerateTrainer:
         # Compute metrics - this will handle gathering across processes
         individual_metrics = self.metrics_tracker.compute_metrics()
         online_metrics = self.online_metrics_tracker.compute_metrics()
+        mf_metrics = self.mf_metrics_tracker.compute_metrics()
+        mf_online_metrics = self.mf_online_metrics_tracker.compute_metrics()
         print('done computing metrics')
         # Only log on main process
         if wandb.run is not None and self.accelerator.is_main_process:
-            all_metrics = {**individual_metrics, **online_metrics}
+            all_metrics = {**individual_metrics, **online_metrics, **mf_metrics, **mf_online_metrics}
             self.accelerator.log(
                 all_metrics,
                 # step=self.global_step + 1
