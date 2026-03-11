@@ -1,5 +1,33 @@
 # MeanFlower VLA - Changelog
 
+## [2026-03-11] Add MeanFlow v_loss during eval, fix double-squeeze bug
+
+**Problem**: Val loss (action-space MSE from single-step sampling) increases monotonically despite training `v_loss` improving. The two metrics are **fundamentally different**: training measures `||u - u_tgt||²` in latent space with adaptive normalization; eval measures action-space MSE. We need a comparable eval metric to determine whether the model is actually overfitting or if the sampling procedure is the bottleneck.
+
+**Bugfix**: `ddp_wrapper.forward()` mutates `batch[target_modality]` in-place via `[:, -1]` (squeezing history dim). When `evaluate()` calls `evaluate_step` multiple times on the same batch (EMA → online → MF_EMA → MF_online), the second+ calls squeeze an already-squeezed tensor (4D→3D→2D), causing `IndexError: too many indices for tensor of dimension 2`. This was a latent bug from the recent dual-eval (EMA + online) addition.
+
+**Code changes:**
+
+| Change | File | Rationale |
+|--------|------|-----------|
+| Add `EVALUATION_MF = 4` mode | `ddp_wrapper.py` | New eval mode that calls `meanflow_eval_loss_step` |
+| Guard `discard_action_history` with `.dim() == 4` | `ddp_wrapper.py` | Prevent double-squeeze when same batch is reused across eval calls |
+| Add `meanflow_eval_loss_step()` | `meanflower.py` | Wrapper: encode observations, delegate to core loss, attach `dataset_index` |
+| Add `meanflow_eval_loss()` | `meanflower.py` | Core: sample `t,r`, build `z_t`, single forward pass, compute `\|\|u - v\|\|²` per sample (no JVP needed) |
+| Add `mf_metrics_tracker` / `mf_online_metrics_tracker` | `flower_trainer.py` | Track per-dataset v_loss for EMA and online weights |
+| Add `mode` param to `evaluate_step()` | `flower_trainer.py` | Pass through to `ddp_wrapper` instead of hardcoded `Mode.EVALUATION` |
+| Run MF eval in `evaluate()` loop | `flower_trainer.py` | Two extra calls per batch (EMA + online) with `Mode.EVALUATION_MF` |
+| Merge MF metrics in `compute_and_log_metrics()` | `flower_trainer.py` | Log all four trackers to wandb |
+
+**New wandb metrics:**
+
+| Metric | What it measures |
+|--------|-----------------|
+| `val_vloss/overall` | `\|\|u - v\|\|²` with EMA weights — comparable to training `v_loss` |
+| `val_vloss_online/overall` | `\|\|u - v\|\|²` with online weights |
+
+**Files changed**: `flower_vla/agents/ddp_wrapper.py`, `flower_vla/agents/meanflower.py`, `flower_vla/trainers/flower_trainer.py`
+
 ## [2026-03-10] Fix inverted ratio semantics, align with py-meanflow reference
 
 **Problem**: Training metrics (raw_mse, cos_u_utgt) kept improving but val_loss **increased** over training: 0.175 (10k) → 0.271 (20k) → 0.313 (30k). Per-dataset val_losses were also identical across all tasks (~0.123) due to a separate metrics bug.
