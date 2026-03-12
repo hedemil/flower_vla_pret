@@ -1,0 +1,78 @@
+defaults:
+  - datamodule: oxe_data
+  - trainer: meanflower_trainer
+
+DATA_NAME: libero_all
+
+wandb:
+  name: finetune_libero_${now:%H-%M-%S}
+  group: finetuning_${now:%Y-%m-%d}
+  project: OXE_pretraining
+  entity: bennoq
+  mode: null
+
+log_dir: logs/
+obs_seq_len: 1
+goal_window_size: 1
+seed: 42
+obs_dim: 16
+goal_dim: 512
+update_ema_every_n_steps: 1
+decay: 0.999
+rampup_ratio: 0.001
+
+# dataloader
+goal_relabeling_strategy: null
+subsample_length: null
+skip_unlabeled: True
+load_camera_views: ["primary"]
+
+# model
+obs_modalities: 'observation'
+goal_modalities: 'task'
+img_modalities: ["image_primary"]
+lang_modalities: ["language_instruction"]
+target_modality: 'action'
+drop_last: True
+pin_memory: True
+num_workers: 0
+
+# finetuning config — loads FlowerVLA checkpoint into MeanFlowerVLA (strict=False)
+finetuning:
+  path: checkpoints/checkpoint_360000/360000_default_weights.pt
+  mode: weights_only
+  strict_loading: False
+  exclude_keys: null
+  map_weights: False
+
+# override agent architecture to match the pretrained checkpoint
+trainer:
+  agent:
+    agent:
+      vlm_path: microsoft/Florence-2-large  # checkpoint was trained with large, not base
+      n_heads: 16          # checkpoint: 16 (default meanflower: 8)
+      attn_pdrop: 0.1      # checkpoint: 0.1 (default meanflower: 0.3)
+      query_seq_len: 100   # checkpoint: 100 (default meanflower: 120)
+      num_sampling_steps: 1 # MeanFlower single-step sampling
+
+# often changed
+gradient_accumulation_steps: 2
+find_unused_parameters: True
+static_graph: False
+
+act_dim: 8
+max_proprio_dim: 16
+act_seq_len: 20  # must match checkpoint (was trained with 20, not 16)
+max_train_steps: 100000
+max_eval_steps: 100
+eval_every_n_steps: 5000
+save_every_n_steps: 5000
+shuffle_buffer_size: 500000
+batch_size: 600
+dataset_size_limit: null
+
+hydra:
+  run:
+    dir: ${log_dir}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${log_dir}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
