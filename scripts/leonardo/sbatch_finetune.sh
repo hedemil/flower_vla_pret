@@ -56,6 +56,46 @@ module load profile/deeplrn
 module load cuda/12.1
 source "${VENV_DIR}/bin/activate"
 
+# --- Set HF_HOME early (needed for download cache) ---
+export HF_HOME="${HF_CACHE}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# --- Verify prerequisites ---
+if [ ! -d "${VENV_DIR}" ]; then
+    echo "ERROR: Venv not found: ${VENV_DIR}"
+    echo "  Run setup.sh first."
+    exit 1
+fi
+
+if [ ! -d "${DATA_DIR}" ]; then
+    echo "ERROR: Data directory not found: ${DATA_DIR}"
+    exit 1
+fi
+
+# --- Download checkpoint from HuggingFace if not present (before offline mode) ---
+CKPT_DIR="${CODE_DIR}/checkpoints/checkpoint_360000"
+CKPT_FILE="${CKPT_DIR}/360000_model_weights.pt"
+if [ ! -f "${CKPT_FILE}" ]; then
+    echo "Checkpoint not found at ${CKPT_FILE}, downloading from HuggingFace..."
+    mkdir -p "${CKPT_DIR}"
+    python -c "
+from huggingface_hub import hf_hub_download
+hf_hub_download(
+    repo_id='mbreuss/flower_vla_pret',
+    filename='360000_model_weights.pt',
+    local_dir='${CKPT_DIR}',
+    local_dir_use_symlinks=False,
+)
+print('Checkpoint downloaded successfully')
+"
+    if [ ! -f "${CKPT_FILE}" ]; then
+        echo "ERROR: Checkpoint download failed"
+        exit 1
+    fi
+else
+    echo "Checkpoint found at ${CKPT_FILE}"
+fi
+
 # --- Environment variables for offline operation ---
 export HYDRA_FULL_ERROR=1
 export TORCHELASTIC_ERROR_FILE="${OUTPUT_DIR}/elastic_error_${SLURM_JOB_ID}.json"
@@ -63,7 +103,6 @@ export WANDB_MODE=offline
 export WANDB_DIR="${WANDB_DIR}"
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
-export HF_HOME="${HF_CACHE}"
 export OXE_DATA_DIR="${DATA_DIR}"
 export OXE_LIBERO_DIR="${DATA_DIR}/modified_libero_rlds"
 
@@ -78,18 +117,6 @@ export NCCL_DEBUG=WARN
 # --- Distributed training settings ---
 export MASTER_ADDR=$(hostname)
 export MASTER_PORT=29500
-
-# --- Verify prerequisites ---
-if [ ! -d "${VENV_DIR}" ]; then
-    echo "ERROR: Venv not found: ${VENV_DIR}"
-    echo "  Run setup.sh first."
-    exit 1
-fi
-
-if [ ! -d "${DATA_DIR}" ]; then
-    echo "ERROR: Data directory not found: ${DATA_DIR}"
-    exit 1
-fi
 
 # --- Quick data integrity check: verify no git-lfs pointer files ---
 for ds in libero_10_no_noops libero_goal_no_noops; do
@@ -123,30 +150,6 @@ echo "Python: $(which python)"
 echo "PyTorch: $(python -c 'import torch; print(torch.__version__)')"
 echo "CUDA available: $(python -c 'import torch; print(torch.cuda.is_available())')"
 echo ""
-
-# --- Download checkpoint from HuggingFace if not present ---
-CKPT_DIR="${CODE_DIR}/checkpoints/checkpoint_360000"
-CKPT_FILE="${CKPT_DIR}/360000_model_weights.pt"
-if [ ! -f "${CKPT_FILE}" ]; then
-    echo "Checkpoint not found at ${CKPT_FILE}, downloading from HuggingFace..."
-    mkdir -p "${CKPT_DIR}"
-    python -c "
-from huggingface_hub import hf_hub_download
-hf_hub_download(
-    repo_id='mbreuss/flower_vla_pret',
-    filename='360000_model_weights.pt',
-    local_dir='${CKPT_DIR}',
-    local_dir_use_symlinks=False,
-)
-print('Checkpoint downloaded successfully')
-"
-    if [ ! -f "${CKPT_FILE}" ]; then
-        echo "ERROR: Checkpoint download failed"
-        exit 1
-    fi
-else
-    echo "Checkpoint found at ${CKPT_FILE}"
-fi
 
 # --- Launch training ---
 cd "${CODE_DIR}"

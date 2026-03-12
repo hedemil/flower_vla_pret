@@ -43,7 +43,7 @@ finetuning:
   mode: weights_only
   strict_loading: False
   exclude_keys: null
-  map_weights: False
+  map_weights: True  # checkpoint keys have 'agent.' prefix that must be stripped
 
 # override agent architecture to match the pretrained checkpoint
 trainer:
@@ -56,7 +56,7 @@ trainer:
       num_sampling_steps: 1 # MeanFlower single-step sampling
 
 # often changed
-gradient_accumulation_steps: 2
+gradient_accumulation_steps: 4  # effective batch = batch_size * grad_accum = 256 * 4 = 1024
 find_unused_parameters: True
 static_graph: False
 
@@ -68,7 +68,7 @@ max_eval_steps: 100
 eval_every_n_steps: 5000
 save_every_n_steps: 5000
 shuffle_buffer_size: 500000
-batch_size: 600
+batch_size: 256  # 256 / 4 GPUs = 64 per GPU (matched to pretraining)
 dataset_size_limit: null
 
 hydra:
