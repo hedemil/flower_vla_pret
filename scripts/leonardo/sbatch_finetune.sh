@@ -126,7 +126,7 @@ echo ""
 
 # --- Download checkpoint from HuggingFace if not present ---
 CKPT_DIR="${CODE_DIR}/checkpoints/checkpoint_360000"
-CKPT_FILE="${CKPT_DIR}/360000_default_weights.pt"
+CKPT_FILE="${CKPT_DIR}/360000_model_weights.pt"
 if [ ! -f "${CKPT_FILE}" ]; then
     echo "Checkpoint not found at ${CKPT_FILE}, downloading from HuggingFace..."
     mkdir -p "${CKPT_DIR}"
@@ -134,8 +134,8 @@ if [ ! -f "${CKPT_FILE}" ]; then
 from huggingface_hub import hf_hub_download
 hf_hub_download(
     repo_id='mbreuss/flower_vla_pret',
-    filename='checkpoint_360000/360000_default_weights.pt',
-    local_dir='${CKPT_DIR}/..',
+    filename='360000_model_weights.pt',
+    local_dir='${CKPT_DIR}',
     local_dir_use_symlinks=False,
 )
 print('Checkpoint downloaded successfully')
@@ -155,7 +155,7 @@ python -m accelerate.commands.launch --num_processes 4 \
     flower_vla/finetuning.py \
     datamodule.datasets.DATA_PATH="${DATA_DIR}" \
     log_dir="${OUTPUT_DIR}" \
-    finetuning.path="${CODE_DIR}/checkpoints/checkpoint_360000/360000_default_weights.pt" \
+    finetuning.path="${CODE_DIR}/checkpoints/checkpoint_360000/360000_model_weights.pt" \
     wandb.name=meanflower_finetune_${SLURM_JOB_ID} \
     wandb.entity=null \
     wandb.mode=offline
