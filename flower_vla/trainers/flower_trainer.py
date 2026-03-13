@@ -354,12 +354,17 @@ class AccelerateTrainer:
                     torch.cuda.empty_cache()
                 if step % 1000 == 0 and self.accelerator.is_main_process:
                     losses_info = self.agent.module.agent.losses_dict
-                    raw_mse = losses_info.get("raw_mse", float("nan"))
-                    v_loss = losses_info.get("v_loss", float("nan"))
-                    dudt_norm = losses_info.get("dudt_norm", float("nan"))
-                    cos_u_utgt = losses_info.get("cos_u_utgt", float("nan"))
-                    cos_u_v = losses_info.get("cos_u_v", float("nan"))
-                    log.info(f"Step {self.global_step}: raw_mse={raw_mse:.6f}, v_loss={v_loss:.6f}, dudt_norm={dudt_norm:.6f}, cos_u_utgt={cos_u_utgt:.4f}, cos_u_v={cos_u_v:.4f}")
+                    log.info(
+                        f"Step {self.global_step}: "
+                        f"loss={losses_info.get('loss', float('nan')):.6f}, "
+                        f"fm_mse={losses_info.get('fm_mse', float('nan')):.4f}, "
+                        f"mf_mse={losses_info.get('mf_mse', float('nan')):.4f}, "
+                        f"lv_fm={losses_info.get('lv_fm', float('nan')):.3f}, "
+                        f"lv_mf={losses_info.get('lv_mf', float('nan')):.3f}, "
+                        f"dudt_norm={losses_info.get('dudt_norm', float('nan')):.4f}, "
+                        f"cos_u_utgt={losses_info.get('cos_u_utgt', float('nan')):.4f}, "
+                        f"cos_u_v={losses_info.get('cos_u_v', float('nan')):.4f}"
+                    )
 
                 if step % 100 == 0 and wandb.run is not None and self.accelerator.is_main_process:
                     # Get metrics from agent

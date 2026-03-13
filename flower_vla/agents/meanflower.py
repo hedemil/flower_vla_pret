@@ -691,6 +691,11 @@ class MeanFlowerVLA(nn.Module):
             cos_u_v = F.cosine_similarity(
                 valid_u.unsqueeze(0), valid_v.unsqueeze(0), dim=-1
             ).mean() if valid_mask.any() else torch.tensor(0.0)
+            # Cosine similarity: u_pred vs u_tgt (MF branch target)
+            valid_u_tgt = u_tgt[valid_mask]
+            cos_u_utgt = F.cosine_similarity(
+                valid_u.unsqueeze(0), valid_u_tgt.unsqueeze(0), dim=-1
+            ).mean() if valid_mask.any() else torch.tensor(0.0)
 
         losses_dict = {
             "loss": loss.item(),
@@ -702,6 +707,10 @@ class MeanFlowerVLA(nn.Module):
             "lv_mf": lv_mf_mean.item(),
             "dudt_norm": dudt_norm.item(),
             "cos_u_v": cos_u_v.item(),
+            # Aliases expected by flower_trainer logging
+            "raw_mse": (fm_mse_mean + mf_mse_mean).item(),
+            "v_loss": loss.item(),
+            "cos_u_utgt": cos_u_utgt.item(),
         }
 
         if hasattr(self, 'accelerator') and self.accelerator is not None and wandb.run is not None:
