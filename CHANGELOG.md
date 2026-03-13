@@ -1,5 +1,62 @@
 # MeanFlower VLA - Changelog
 
+## [2026-03-13] Integrate Decoupled MeanFlow (DMF) with log-variance loss weighting
+
+**Motivation**: Standard iMF uses a single DiT with shared t/h conditioning and adaptive loss normalization `loss/(loss+eps)^p`. DMF (Kyungmin Lee, 2025) decouples the DiT into encoder (t-conditioned) and decoder (r-conditioned) blocks, enabling cleaner single-step inference at `r=0`. It also replaces the adaptive weighting with a learned log-variance head, which provides per-sample loss scaling without the hand-tuned `eps`/`p` hyperparameters that were a recurring source of instability (see entries from 2026-03-01 and 2026-03-10).
+
+**Architecture changes**:
+
+| Component | Before (iMF) | After (DMF) |
+|-----------|-------------|-------------|
+| DiT backbone | `nn.ModuleList` of 12 FlowBlocks, all conditioned on `t` | `DMFTransformer`: 8 encoder blocks (t-conditioned) + 4 decoder blocks (r-conditioned) |
+| Timestep conditioning | `t_embedder` only; `h = t - r` passed to MeanFlowDecoder | `t_embedder` (encoder) + `r_embedder` (decoder); `r` passed directly |
+| AdaLN | Single `adaln` / `adaln` dict | `adaln_t` (encoder) + `adaln_r` (decoder), or per-action `adaln` dict called twice |
+| Action decoder | Plain `nn.Linear` | Same — r-conditioning now handled by decoder blocks |
+| Loss weighting | Adaptive `loss/(loss.detach()+eps)^p` | Learned log-variance: `log(mse/exp(lv) + eps) + lv` |
+| Loss structure | Single MF branch with JVP | Dual-loss: FM branch (r=t, no JVP) + MF branch (r≠t, JVP) |
+| Time sampling | Single logit-normal, then split by ratio | Separate logit-normals for t and r with independent means |
+| Inference | `u(z, t=1, h=1)` | `u(z, t=1, r=0)` |
+
+**Log-variance head**: Stateless sinusoidal embeddings of `(t, r)` → concat → `nn.Linear(256, 1)` → scalar `lv`. Zero-initialized so `exp(lv)=1` at init (no scaling). Only 257 new learnable parameters.
+
+**Weight mapping**: `map_flower_to_meanflower()` maps FlowerVLA checkpoint keys to DMF format:
+- `dit.{i}.*` → `dit.encoder_blocks.{i}.*` (layers 0-7) or `dit.decoder_blocks.{i-8}.*` (layers 8-11)
+- `t_embedder.*` → copied to `r_embedder.*`
+- Per-action `adaln.*` keys kept as-is (shared structure with `action_type_adaln=True`)
+- `logvar_linear` zero-init'd by constructor, no pretrained weights needed
+
+**Code changes:**
+
+| Change | File | Rationale |
+|--------|------|-----------|
+| Remove `MeanFlowDecoder` import | `meanflower.py` | Class doesn't exist, already using `nn.Linear` |
+| Remove dead `self.adaln` (shared path) | `meanflower.py` | Was created then overwritten by `adaln_t`/`adaln_r` |
+| Add `logvar_timestep_embedding()`, `log_lv_loss()` | `meanflower.py` | Module-level utilities for DMF loss |
+| Add `logvar_linear` component | `meanflower.py` | Zero-init learned log-variance head |
+| Rewrite `dit_forward_meanflow(h→r, +return_logvar)` | `meanflower.py` | Pass `r` directly to `r_embedder`; optionally return log-variance |
+| Rewrite `meanflow_loss` with DMF dual-loss | `meanflower.py` | FM branch (r=t) + MF branch (r≠t, JVP), both use `log_lv_loss` |
+| Fix sampling: `h=1` → `r=0` | `meanflower.py` | DMF single-step inference uses `r=0` |
+| Update `meanflow_eval_loss` | `meanflower.py` | Use `sample_times()`, pass `r` directly |
+| Remove deprecated `sample_tr` | `meanflower.py` | Replaced by `sample_times()` |
+| Add `map_flower_to_meanflower()` | `utils/model_loading.py` | Structural key mapping for checkpoint loading |
+| Add `load_pretrained_weights()` with `map_type` | `utils/model_loading.py` | Generic loading with optional key transformation |
+| Thread `map_type` through trainer | `flower_trainer.py`, `finetuning.py` | End-to-end wiring from config to weight mapper |
+| Add `map_type: flower_to_dmf` | `finetuning.yaml` | Enable structural mapping when loading FlowerVLA checkpoint |
+| Add DMF distribution params | `meanflower_vla.yaml` | `P_mean_t=-0.2`, `P_std_t=1.0`, `P_mean_r=0.2`, `P_std_r=1.0` |
+
+**New wandb metrics:**
+
+| Metric | What it measures |
+|--------|-----------------|
+| `fm_mse` | FM branch MSE (flow matching quality) |
+| `mf_mse` | MF branch MSE (mean flow quality) |
+| `fm_log_loss` / `mf_log_loss` | Log-variance weighted losses per branch |
+| `lv_fm` / `lv_mf` | Mean log-variance per branch (tracks learned scaling) |
+| `dudt_norm` | du/dt magnitude (MF branch) |
+| `cos_u_v` | Cosine similarity u vs v (single-step convergence) |
+
+**Files changed**: `flower_vla/agents/meanflower.py`, `flower_vla/agents/networks/meanflower_transformers.py`, `flower_vla/utils/model_loading.py`, `flower_vla/trainers/flower_trainer.py`, `flower_vla/finetuning.py`, `conf/finetuning.yaml`, `conf/trainer/agent/meanflower_vla.yaml`
+
 ## [2026-03-11] Add MeanFlow v_loss during eval, fix double-squeeze bug
 
 **Problem**: Val loss (action-space MSE from single-step sampling) increases monotonically despite training `v_loss` improving. The two metrics are **fundamentally different**: training measures `||u - u_tgt||²` in latent space with adaptive normalization; eval measures action-space MSE. We need a comparable eval metric to determine whether the model is actually overfitting or if the sampling procedure is the bottleneck.

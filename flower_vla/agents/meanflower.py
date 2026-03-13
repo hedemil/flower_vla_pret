@@ -588,6 +588,20 @@ class MeanFlowerVLA(nn.Module):
 
         valid_mask_f = valid_mask.to(dtype=torch.float32)
 
+        # Monkey-patch nn.Linear and RmsNorm for dtype safety (bf16 weights + f32 inputs)
+        _orig_linear_forward = nn.Linear.forward
+        _orig_rmsnorm_forward = RmsNorm.forward
+
+        def _jvp_safe_linear_forward(self, input):
+            return F.linear(
+                input,
+                self.weight.to(input.dtype),
+                self.bias.to(input.dtype) if self.bias is not None else None,
+            )
+
+        def _jvp_safe_rmsnorm_forward(self, x):
+            return F.rms_norm(x, self.normalized_shape, self.weight.to(x.dtype), self.eps)
+
         # ========== FM branch (r = t, no JVP) ==========
         t_fm_exp = t_fm.to(dtype=default_dtype)
         z_fm = (1 - t_fm_exp) * actions + t_fm_exp * e
@@ -595,9 +609,15 @@ class MeanFlowerVLA(nn.Module):
 
         t_fm_flat = t_fm.view(-1).float()
         with torch.amp.autocast("cuda", enabled=False):
-            v_pred, lv_fm = self.dit_forward_meanflow(
-                z_fm, t_fm_flat, t_fm_flat, cond, return_logvar=True
-            )
+            nn.Linear.forward = _jvp_safe_linear_forward
+            RmsNorm.forward = _jvp_safe_rmsnorm_forward
+            try:
+                v_pred, lv_fm = self.dit_forward_meanflow(
+                    z_fm, t_fm_flat, t_fm_flat, cond, return_logvar=True
+                )
+            finally:
+                nn.Linear.forward = _orig_linear_forward
+                RmsNorm.forward = _orig_rmsnorm_forward
 
         v_pred_valid = v_pred * valid_mask_f
         v_target_valid = v.float() * valid_mask_f
@@ -622,20 +642,6 @@ class MeanFlowerVLA(nn.Module):
         # Tangent vectors for JVP
         dtdt = torch.ones_like(t_mf_exp_f32)
         drdt = torch.zeros_like(r_mf_exp_f32)
-
-        # Monkey-patch nn.Linear and RmsNorm for JVP dtype safety
-        _orig_linear_forward = nn.Linear.forward
-        _orig_rmsnorm_forward = RmsNorm.forward
-
-        def _jvp_safe_linear_forward(self, input):
-            return F.linear(
-                input,
-                self.weight.to(input.dtype),
-                self.bias.to(input.dtype) if self.bias is not None else None,
-            )
-
-        def _jvp_safe_rmsnorm_forward(self, x):
-            return F.rms_norm(x, self.normalized_shape, self.weight.to(x.dtype), self.eps)
 
         with torch.amp.autocast("cuda", enabled=False):
             nn.Linear.forward = _jvp_safe_linear_forward
