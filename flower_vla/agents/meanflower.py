@@ -514,7 +514,7 @@ class MeanFlowerVLA(nn.Module):
             if mask.any():
                 adim = self.action_space_index.get_action_dim(action_idx)
                 valid_dims[mask, :, :adim] = 1
-                encoded[mask] = self.action_encoders[action_name](z[mask, :, :adim])
+                encoded[mask] = self.action_encoders[action_name](z[mask, :, :adim]).to(encoded.dtype)
         return encoded, valid_dims
 
     def decode_actions_meanflow(self, z: torch.Tensor, action_type: torch.Tensor, valid_dims: torch.Tensor) -> torch.Tensor:
@@ -537,7 +537,7 @@ class MeanFlowerVLA(nn.Module):
             if mask.any():
                 adim = self.action_space_index.get_action_dim(action_idx)
                 pred = self.action_decoders[action_name](z[mask])
-                decoded[mask, :, :adim] = pred[..., :adim] * valid_dims[mask, :, :adim]
+                decoded[mask, :, :adim] = (pred[..., :adim] * valid_dims[mask, :, :adim]).to(default_dtype)
         return decoded
 
     # === Loss Functions ===
