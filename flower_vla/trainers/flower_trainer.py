@@ -889,20 +889,22 @@ class AccelerateTrainer:
         weights_path: str,
         strict: bool = False,
         exclude_keys: Optional[list] = None,
-        map_weights: bool = False  # Adding the missing parameter
+        map_weights: bool = False,
+        map_type: Optional[str] = None,
     ) -> None:
         """
         Load pretrained weights for finetuning.
-        
+
         Args:
             weights_path: Path to weights file (.safetensors or .pt)
             strict: Whether to strictly enforce all keys match
             exclude_keys: List of key patterns to exclude from loading
             map_weights: If True, attempt to map weights even if key names don't match exactly
+            map_type: Structural weight mapping. 'flower_to_dmf' maps FlowerVLA → DMF architecture.
         """
         try:
             log.info(f"Loading pretrained weights from {weights_path}")
-            
+
             # Load state dict based on file type
             if weights_path.endswith('.safetensors'):
                 from safetensors.torch import load_file
@@ -920,22 +922,20 @@ class AccelerateTrainer:
                     if not any(ex in k for ex in exclude_keys):
                         filtered_state_dict[k] = v
                 state_dict = filtered_state_dict
-            
-            
 
             # Get base model without DDP wrapper
             if hasattr(self.agent, 'module'):
                 base_model = self.agent.module.agent
             else:
                 base_model = self.agent.agent
-            
+
             # Handle key mapping if needed
             if map_weights:
                 log.info("Attempting to map weights by matching key patterns")
                 new_state_dict = {}
                 model_keys = dict(base_model.named_parameters())
                 model_keys.update(dict(base_model.named_buffers()))
-                
+
                 # Try to match keys by removing prefixes or finding similar patterns
                 for k, v in state_dict.items():
                     # Try different variations to match keys
@@ -944,26 +944,37 @@ class AccelerateTrainer:
                         new_state_dict[clean_k] = v
                     elif 'agent.' + clean_k in model_keys:
                         new_state_dict['agent.' + clean_k] = v
-                
+
                 if len(new_state_dict) > 0:
                     log.info(f"Successfully mapped {len(new_state_dict)}/{len(state_dict)} keys")
                     state_dict = new_state_dict
                 else:
                     log.warning("Could not map any keys, falling back to original state dict")
 
+            # Apply structural weight mapping (e.g. FlowerVLA → DMF architecture)
+            if map_type == 'flower_to_dmf':
+                from flower_vla.utils.model_loading import map_flower_to_meanflower
+                state_dict = map_flower_to_meanflower(state_dict)
+            elif map_type is not None:
+                raise ValueError(f"Unknown map_type: {map_type}")
+
             # Load weights
             missing, unexpected = base_model.load_state_dict(state_dict, strict=strict)
-            
+
             # Move to correct device and dtype
             base_model = base_model.to(device=self.device, dtype=torch.bfloat16)
-            
+
             # Log results
             log.info(f"Successfully loaded pretrained weights from {weights_path}")
             if len(missing) > 0:
                 log.info(f"Missing keys: {len(missing)}")
+                for k in missing[:20]:
+                    log.info(f"  missing: {k}")
             if len(unexpected) > 0:
                 log.info(f"Unexpected keys: {len(unexpected)}")
-                
+                for k in unexpected[:20]:
+                    log.info(f"  unexpected: {k}")
+
         except Exception as e:
             log.error(f"Failed to load pretrained weights: {e}")
             import traceback
@@ -977,30 +988,33 @@ class AccelerateTrainer:
         strict: bool = False,
         exclude_keys: Optional[list] = None,
         map_weights: bool = False,
+        map_type: Optional[str] = None,
         ema_name: Optional[str] = None,
         step: int = 0
     ) -> None:
         """
         Flexible method for loading pretrained models for finetuning - either just weights or full state.
-        
+
         Args:
             path: Path to weights file or directory containing checkpoint
             mode: Loading mode - "weights_only" or "full_state"
             strict: Whether to strictly enforce all keys match (for weights_only mode)
             exclude_keys: List of key patterns to exclude from loading (for weights_only mode)
             map_weights: If True, attempt to map weights even if key names don't match (for weights_only mode)
+            map_type: Structural weight mapping (e.g. 'flower_to_dmf')
             ema_name: Name of EMA state file to load if available (for full_state mode)
             step: Step to start from when loading full state (for full_state mode)
         """
         log.info(f"Loading pretrained model with mode: {mode}")
-        
+
         if mode == "weights_only":
             # Use enhanced load_pretrained_weights to load just the model weights
             self.load_pretrained_weights(
                 weights_path=path,
                 strict=strict,
                 exclude_keys=exclude_keys,
-                map_weights=map_weights
+                map_weights=map_weights,
+                map_type=map_type,
             )
             log.info("Successfully loaded pretrained weights for finetuning")
             

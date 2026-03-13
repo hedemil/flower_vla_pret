@@ -44,6 +44,7 @@ finetuning:
   strict_loading: False
   exclude_keys: null
   map_weights: True  # checkpoint keys have 'agent.' prefix that must be stripped
+  map_type: flower_to_dmf  # structural mapping: FlowerVLA → DMF (encoder/decoder split, adaln duplication, r_embedder copy)
 
 # override agent architecture to match the pretrained checkpoint
 trainer:

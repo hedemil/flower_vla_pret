@@ -423,6 +423,81 @@ class FlowBlock(nn.Module):
 
         return x_final
 
+###############################################################################
+# Decoupled MeanFlow Transformer
+###############################################################################
+
+class DMFTransformer(nn.Module):
+    """
+    Decoupled MeanFlow Transformer: splits DiT into encoder (t-conditioned)
+    and decoder (r-conditioned) blocks.
+    
+    The encoder processes z_t with timestep t conditioning.
+    The decoder takes encoder output and produces u(z_t, t, r) with r conditioning.
+    """
+    def __init__(self,
+                 dim: int,
+                 n_encoder_layers: int,
+                 n_decoder_layers: int,
+                 heads: int = 8,
+                 attn_pdrop: float = 0.0,
+                 resid_pdrop: float = 0.0,
+                 mlp_pdrop: float = 0.0,
+                 use_cross_attn: bool = True,
+                 use_rope: bool = False,
+                 query_seq_len: int = 128,
+                 rope_theta: float = 32) -> None:
+        super().__init__()
+        
+        # Encoder blocks: conditioned on t
+        self.encoder_blocks = nn.ModuleList([
+            FlowBlock(
+                dim=dim, heads=heads,
+                attn_pdrop=attn_pdrop, resid_pdrop=resid_pdrop,
+                mlp_pdrop=mlp_pdrop, use_cross_attn=use_cross_attn,
+                use_rope=use_rope, query_seq_len=query_seq_len,
+                rope_theta=rope_theta
+            ) for _ in range(n_encoder_layers)
+        ])
+        
+        # Decoder blocks: conditioned on r
+        self.decoder_blocks = nn.ModuleList([
+            FlowBlock(
+                dim=dim, heads=heads,
+                attn_pdrop=attn_pdrop, resid_pdrop=resid_pdrop,
+                mlp_pdrop=mlp_pdrop, use_cross_attn=use_cross_attn,
+                use_rope=use_rope, query_seq_len=query_seq_len,
+                rope_theta=rope_theta
+            ) for _ in range(n_decoder_layers)
+        ])
+    
+    def forward(self, z, t_cond, r_cond, context=None,
+                custom_attn_mask=None, custom_cross_attn_mask=None,
+                is_causal=False, t_global_adaln=None, r_global_adaln=None):
+        """
+        Args:
+            z: Action latents [B, L, D]
+            t_cond: Global conditioning from t [B, D]
+            r_cond: Global conditioning from r [B, D]
+            context: VLM features for cross-attention
+            t_global_adaln: AdaLN signals for encoder (from t)
+            r_global_adaln: AdaLN signals for decoder (from r)
+        """
+        # Encoder pass: conditioned on t
+        for layer in self.encoder_blocks:
+            z = layer(z, t_cond, context=context,
+                      custom_attn_mask=custom_attn_mask,
+                      custom_cross_attn_mask=custom_cross_attn_mask,
+                      is_causal=is_causal, global_adaln=t_global_adaln)
+        
+        # Decoder pass: conditioned on r
+        for layer in self.decoder_blocks:
+            z = layer(z, r_cond, context=context,
+                      custom_attn_mask=custom_attn_mask,
+                      custom_cross_attn_mask=custom_cross_attn_mask,
+                      is_causal=is_causal, global_adaln=r_global_adaln)
+        
+        return z
 
 
 ###############################################################################
@@ -588,47 +663,4 @@ class ZeroEncoder(nn.Module):
 
     def forward(self, x):
         return torch.zeros((x.shape[0], self.dit_dim), device=self.device, dtype=x.dtype)
-    
-
-class MeanFlowDecoder(nn.Module):
-    def __init__(self, dit_dim: int, action_dim: int, hidden_dim: int=None):
-        super().__init__()
-        hidden_dim = hidden_dim or dit_dim * 2
-
-        # Time embedding for h (timestep difference)
-        # Reuse TimestepEmbedder architecture (sinusodal embedding + MLP)
-        self.h_embedder = TimestepEmbedder(hidden_size=dit_dim)
-
-        # Decoder MLP
-        self.decoder = nn.Sequential(
-            nn.Linear(dit_dim * 2, hidden_dim), # dit_dim (features) + dit_dim (h embedding)
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, action_dim)
-        )
-        nn.init.zeros_(self.decoder[-1].weight)
-        nn.init.zeros_(self.decoder[-1].bias)
-
-    def forward(self, z: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
-        """
-        Decode the mean action from latent representation z and timestep difference h.
-        
-        Args:
-            z: Latent representation tensor of shape [B, T, dit_dim].
-            h: Timestep difference (t - r) tensor of shape [B] or [B, 1, 1].
-        Returns:
-            Average velocity u [B, T, action_dim].
-        """
-        # Flatten h to [B] for embedding
-        h_flat = h.view(-1)
-
-        # Embed timestep difference
-        h_embed = self.h_embedder(h_flat)  # [B, dit_dim]
-        h_embed = h_embed.unsqueeze(1).expand(-1, z.shape[1], -1)  # [B, T, dit_dim]
-
-        # Concatenate and decode
-        z_h = torch.cat([z, h_embed], dim=-1)  # [B, T, dit_dim * 2]
-
-        return self.decoder(z_h)  # [B, T, action_dim]
     

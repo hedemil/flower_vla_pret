@@ -166,6 +166,7 @@ def main(cfg: DictConfig) -> None:
                         strict=cfg.finetuning.get('strict_loading', False),
                         exclude_keys=cfg.finetuning.get('exclude_keys', None),
                         map_weights=cfg.finetuning.get('map_weights', False),
+                        map_type=cfg.finetuning.get('map_type', None),
                         ema_name=cfg.finetuning.get('ema_name', 'custom_checkpoint_0.pkl'),
                         step=cfg.finetuning.get('step', 0)
                     )

@@ -23,12 +23,43 @@ from flower_vla.agents.networks.meanflower_transformers import (
     ActionSpaceEmbedderParameter,
     ZeroEncoder,
     FlowBlock,
-    MeanFlowDecoder,
+    DMFTransformer,
     stateless_norm
 )
 from flower_vla.dataset.utils.act_seq_mapping import DATASET_ACT_SEQ_MAP
 
 logger = logging.getLogger(__name__)
+
+
+def logvar_timestep_embedding(t, dim=128, max_period=10000):
+    """Sinusoidal timestep embedding for log-variance head (no learnable params)."""
+    half = dim // 2
+    freqs = 1000 * torch.exp(
+        -math.log(max_period) * torch.arange(start=0, end=half, device=t.device, dtype=t.dtype) / half
+    )
+    args = t[:, None] * freqs[None]
+    return torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+
+
+def log_lv_loss(x, y, lv, eps=0.01):
+    """
+    Log-variance weighted loss from DMF (Decoupled MeanFlow).
+
+    Args:
+        x: prediction [B, T, D]
+        y: target [B, T, D]
+        lv: log-variance scalar [B, 1, 1] (predicted by model)
+        eps: numerical stability constant
+
+    Returns:
+        mse_loss: per-sample sum of squared errors [B]
+        log_loss: per-sample log-variance weighted loss [B]
+    """
+    err = (x - y) ** 2
+    mse_loss = torch.sum(err, dim=list(range(1, len(x.shape))))
+    mean_loss = torch.mean(err, dim=list(range(1, len(x.shape))))
+    log_loss = torch.log((1 / lv.exp()) * mean_loss + eps) + lv
+    return mse_loss, log_loss
 
 
 class MeanFlowerVLA(nn.Module):
@@ -87,6 +118,11 @@ class MeanFlowerVLA(nn.Module):
         P_mean: float = -0.4,
         P_std: float = 1.0,
         ratio: float = 0.75,
+        # DMF separate distribution parameters
+        P_mean_t: float = -0.2,
+        P_std_t: float = 1.0,
+        P_mean_r: float = 0.2,
+        P_std_r: float = 1.0,
     ):
         """
         Initializes the MeanFlowerVLA agent that combines a pretrained vision–language model
@@ -154,6 +190,23 @@ class MeanFlowerVLA(nn.Module):
         self.register_buffer(
             "P_std",
             torch.tensor(P_std, dtype=torch.float32)
+        )
+        # DMF separate distribution parameters for t and r
+        self.register_buffer(
+            "P_mean_t",
+            torch.tensor(P_mean_t, dtype=torch.float32)
+        )
+        self.register_buffer(
+            "P_std_t",
+            torch.tensor(P_std_t, dtype=torch.float32)
+        )
+        self.register_buffer(
+            "P_mean_r",
+            torch.tensor(P_mean_r, dtype=torch.float32)
+        )
+        self.register_buffer(
+            "P_std_r",
+            torch.tensor(P_std_r, dtype=torch.float32)
         )
 
         logger.info("VLM and DiT components set up.")
@@ -263,15 +316,16 @@ class MeanFlowerVLA(nn.Module):
         rope_theta: float
     ) -> None:
         """
-        Sets up DiT components for Mean Flow. Identical to _setup_dit_components
-        except action_decoders use MeanFlowDecoder (h-conditioned) instead of nn.Linear.
+        Sets up DiT components for Decoupled MeanFlow (DMF).
+        Uses encoder-decoder DMFTransformer with separate t/r conditioning.
         """
         # Initialize module dictionaries
         self.action_encoders = nn.ModuleDict()
         self.action_decoders = nn.ModuleDict()
         if self.use_proprio:
             self.proprio_encoders = nn.ModuleDict()
-        self.adaln = nn.ModuleDict() if self.action_type_adaln else None
+        if self.action_type_adaln:
+            self.adaln = nn.ModuleDict()
 
         # Set up action-specific components
         for action_name, action_idx in self.action_space_index.action_spaces.items():
@@ -284,12 +338,9 @@ class MeanFlowerVLA(nn.Module):
                 out_features=dit_dim,
                 bias=True
             )
-            # MeanFlowDecoder replaces nn.Linear
-            self.action_decoders[action_name] = MeanFlowDecoder(
-                dit_dim=dit_dim,
-                action_dim=input_dim,
-                hidden_dim=dit_dim * 2
-            ).to(self.device)
+
+            # DMF: plain linear decoder — r-conditioning is in the decoder blocks
+            self.action_decoders[action_name] = nn.Linear(dit_dim, input_dim).to(self.device)
 
             # Action-specific AdaLN
             if self.action_type_adaln:
@@ -314,17 +365,10 @@ class MeanFlowerVLA(nn.Module):
                         device=self.device
                     )
 
-        # Set up shared AdaLN if not using action-specific AdaLN
-        if not self.action_type_adaln:
-            self.adaln = SharedAdaLNController(
-                dit_dim,
-                global_conddim=dit_dim,
-                use_cross_attn=use_cross_attn
-            )
-
         # Set up shared conditioning components
         self.cond_linear = nn.Linear(hidden_dim, dit_dim, bias=False)
-        self.t_embedder = TimestepEmbedder(dit_dim)
+        self.t_embedder = TimestepEmbedder(dit_dim)     # for encoder (t)
+        self.r_embedder = TimestepEmbedder(dit_dim)     # for decoder (r) — NEW
         self.cond_norm = RmsNorm(hidden_dim)
         self.frequency_embedder = FreqEmbedder(dit_dim)
         self.action_space_embedder = ActionSpaceEmbedderParameter(
@@ -338,20 +382,35 @@ class MeanFlowerVLA(nn.Module):
                 torch.randn(1, act_window_size, dit_dim) * 0.1
             )
 
+        # Replace flat DiT list with encoder-decoder split
+        n_encoder_layers = n_layers * 2 // 3  # e.g., 8 of 12
+        n_decoder_layers = n_layers - n_encoder_layers  # e.g., 4 of 12
+
         # Set up DiT blocks
-        self.dit = nn.ModuleList([
-            FlowBlock(
-                dim=dit_dim,
-                heads=n_heads,
-                attn_pdrop=attn_pdrop,
-                resid_pdrop=resid_pdrop,
-                mlp_pdrop=mlp_pdrop,
-                use_cross_attn=use_cross_attn,
-                use_rope=use_rope,
-                query_seq_len=query_seq_len,
-                rope_theta=rope_theta
-            ) for _ in range(n_layers)
-        ])
+        self.dit = DMFTransformer(
+            dim=dit_dim,
+            n_encoder_layers=n_encoder_layers,
+            n_decoder_layers=n_decoder_layers,
+            heads=n_heads,
+            attn_pdrop=attn_pdrop,
+            resid_pdrop=resid_pdrop,
+            mlp_pdrop=mlp_pdrop,
+            use_cross_attn=use_cross_attn,
+            use_rope=use_rope,
+            query_seq_len=query_seq_len,
+            rope_theta=rope_theta
+        )
+
+        # Separate AdaLN controllers for encoder and decoder
+        if not self.action_type_adaln:
+            self.adaln_t = SharedAdaLNController(dit_dim, global_conddim=dit_dim, use_cross_attn=use_cross_attn)
+            self.adaln_r = SharedAdaLNController(dit_dim, global_conddim=dit_dim, use_cross_attn=use_cross_attn)
+
+        # Log-variance prediction head for DMF loss weighting
+        # Uses sinusoidal embeddings of (t, r) → concat → linear → scalar lv
+        self.logvar_linear = nn.Linear(256, 1)  # 128 (t embed) + 128 (r embed) → 1
+        nn.init.constant_(self.logvar_linear.weight, 0)
+        nn.init.constant_(self.logvar_linear.bias, 0)
 
     def _verify_device_consistency(self) -> None:
         """Verifies that all parameters and buffers are on the expected device."""
@@ -458,42 +517,40 @@ class MeanFlowerVLA(nn.Module):
                 encoded[mask] = self.action_encoders[action_name](z[mask, :, :adim])
         return encoded, valid_dims
 
-    def decode_actions_meanflow(
-        self, z: torch.Tensor, h: torch.Tensor,
-        action_type: torch.Tensor, valid_dims: torch.Tensor
-    ) -> torch.Tensor:
+    def decode_actions_meanflow(self, z: torch.Tensor, action_type: torch.Tensor, valid_dims: torch.Tensor) -> torch.Tensor:
         """
-        Decodes latent representations into actions using MeanFlowDecoder.
-        The decoder is conditioned on h = t - r.
+        Decodes latent representations into actions using plain linear projection.
+        In DMF, r-conditioning is handled by the decoder transformer blocks,
+        so the output head is just nn.Linear.
 
         Args:
             z: DiT latent features [B, T, dit_dim]
-            h: Timestep difference (t - r), broadcastable shape.
             action_type: Action type indices [B] or broadcastable.
             valid_dims: Valid dimensions mask [B, T, action_dim].
         """
+        default_dtype = next(self.parameters()).dtype
         B = z.shape[0]
         max_action_dim = self.action_dim
-        decoded = torch.zeros(B, z.shape[1], max_action_dim, device=self.device, dtype=z.dtype)
+        decoded = torch.zeros(B, z.shape[1], max_action_dim, device=self.device, dtype=default_dtype)
         for action_name, action_idx in self.action_space_index.action_spaces.items():
             mask = (action_type == action_idx)
             if mask.any():
                 adim = self.action_space_index.get_action_dim(action_idx)
-                # MeanFlowDecoder takes (z, h)
-                if mask.all():
-                    pred = self.action_decoders[action_name](z, h)
-                else:
-                    # Slice h for masked batch elements
-                    h_masked = h[mask] if h.dim() >= 1 and h.shape[0] == B else h
-                    pred = self.action_decoders[action_name](z[mask], h_masked)
+                pred = self.action_decoders[action_name](z[mask])
                 decoded[mask, :, :adim] = pred[..., :adim] * valid_dims[mask, :, :adim]
         return decoded
 
     # === Loss Functions ===
     def meanflow_loss(self, cond: dict, actions: torch.Tensor, dataset_idx: Any = None) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
-        Computes the Mean Flow loss using JVP (Jacobian Vector Product).
-        Based on: https://github.com/Gsunshine/py-meanflow
+        Computes the Decoupled MeanFlow (DMF) dual loss with log-variance weighting.
+
+        Two branches:
+          FM branch: standard flow matching (r = t), no JVP needed
+          MF branch: mean flow (r ≠ t), uses JVP for du/dt
+
+        Both branches use learned log-variance weighting instead of adaptive loss/(loss+eps)^p.
+        Reference: https://github.com/kyungmnlee/dmf
         """
         default_dtype = next(self.parameters()).dtype
         action_type = cond['action_type']
@@ -503,12 +560,8 @@ class MeanFlowerVLA(nn.Module):
         device = actions.device
         actions = actions.to(dtype=default_dtype)
 
-        # Sample t and r with constraint t >= r
-        t, r = self.sample_tr(b)
-
-        # Interpolate: z_t = (1 - t) * x + t * e
-        texp = t.view([b] + [1] * (actions.dim() - 1)).to(dtype=default_dtype)
-        rexp = r.view([b] + [1] * (actions.dim() - 1)).to(dtype=default_dtype)
+        # Sample timesteps: t_fm for FM branch, (t_mf, r_mf) for MF branch
+        t_fm, t_mf, r_mf = self.sample_times(b)
 
         # Sample noise per action space
         e = torch.zeros_like(actions)
@@ -522,32 +575,55 @@ class MeanFlowerVLA(nn.Module):
                 )
                 e[mask, :, :adim] = noise_slice
 
-        z = (1 - texp) * actions + texp * e
         v = e - actions  # target velocity
 
-        # Cast to float32 for JVP — dual tensors must have matching dtype
-        # throughout. RmsNorm's JVP promotes tangents to float32, so if primals
-        # are bf16 we get mixed-dtype duals that crash F.linear.
-        z = z.float()
-        v = v.float()
-        texp = texp.float()
-        rexp = rexp.float()
+        # Build valid mask for action spaces
+        valid_mask = torch.zeros_like(actions, dtype=torch.bool)
+        for action_name, action_idx in self.action_space_index.action_spaces.items():
+            mask = (action_type == action_idx)
+            if mask.any():
+                adim = self.action_space_index.get_action_dim(action_idx)
+                mask_expanded = mask.view(-1, 1, 1).expand(-1, actions.size(1), adim).to(device)
+                valid_mask[mask, :, :adim] = mask_expanded[mask]
+
+        valid_mask_f = valid_mask.to(dtype=torch.float32)
+
+        # ========== FM branch (r = t, no JVP) ==========
+        t_fm_exp = t_fm.to(dtype=default_dtype)
+        z_fm = (1 - t_fm_exp) * actions + t_fm_exp * e
+        z_fm = z_fm.float()
+
+        t_fm_flat = t_fm.view(-1).float()
+        with torch.amp.autocast("cuda", enabled=False):
+            v_pred, lv_fm = self.dit_forward_meanflow(
+                z_fm, t_fm_flat, t_fm_flat, cond, return_logvar=True
+            )
+
+        v_pred_valid = v_pred * valid_mask_f
+        v_target_valid = v.float() * valid_mask_f
+        fm_mse, fm_log = log_lv_loss(v_pred_valid, v_target_valid, lv_fm)
+
+        # ========== MF branch (r ≠ t, uses JVP) ==========
+        t_mf_exp = t_mf.to(dtype=default_dtype)
+        z_mf = (1 - t_mf_exp) * actions + t_mf_exp * e
+
+        # Cast to float32 for JVP
+        z_mf = z_mf.float()
+        v_f32 = v.float()
+        t_mf_exp_f32 = t_mf_exp.float()
+        r_mf_exp_f32 = r_mf.to(dtype=torch.float32)
 
         # Define network function for JVP
         def u_func(z_input, t_input, r_input):
-            h_input = t_input - r_input
-            t_flat = t_input.detach().view(-1)   # zero tangent through t_embedder/adaLN
-            h_flat = h_input.detach().view(-1)   # zero tangent through h_embedder/decoder
-            return self.dit_forward_meanflow(z_input, t_flat, h_flat, cond)
+            t_flat = t_input.detach().view(-1)   # zero tangent through t_embedder
+            r_flat = r_input.detach().view(-1)   # zero tangent through r_embedder
+            return self.dit_forward_meanflow(z_input, t_flat, r_flat, cond, return_logvar=True)
 
-        # Tangent vectors for JVP (float32 to match)
-        dtdt = torch.ones_like(texp)
-        drdt = torch.zeros_like(rexp)
+        # Tangent vectors for JVP
+        dtdt = torch.ones_like(t_mf_exp_f32)
+        drdt = torch.zeros_like(r_mf_exp_f32)
 
-        # Compute u and du/dt using JVP
-        # Monkey-patch nn.Linear and RmsNorm to cast weights to input dtype
-        # during JVP, because torch.func.jvp dual tensors' .to(dtype) only
-        # casts the primal, not the tangent — so we cast weights instead.
+        # Monkey-patch nn.Linear and RmsNorm for JVP dtype safety
         _orig_linear_forward = nn.Linear.forward
         _orig_rmsnorm_forward = RmsNorm.forward
 
@@ -565,111 +641,61 @@ class MeanFlowerVLA(nn.Module):
             nn.Linear.forward = _jvp_safe_linear_forward
             RmsNorm.forward = _jvp_safe_rmsnorm_forward
             try:
-                u_pred, dudt = torch.func.jvp(
+                (u_pred, lv_mf), (dudt, _) = torch.func.jvp(
                     u_func,
-                    (z, texp, rexp),
-                    (v, dtdt, drdt)
+                    (z_mf, t_mf_exp_f32, r_mf_exp_f32),
+                    (v_f32, dtdt, drdt)
                 )
             finally:
                 nn.Linear.forward = _orig_linear_forward
                 RmsNorm.forward = _orig_rmsnorm_forward
 
-            # u_tgt = v - h * du/dt
-            h = (texp - rexp).clamp(min=0.0, max=1.0)
-            u_tgt = (v - h * dudt).detach()
+            # u_tgt = v + (r - t) * du/dt  (DMF sign convention)
+            h = (r_mf_exp_f32 - t_mf_exp_f32)  # negative since r <= t
+            u_tgt = (v_f32 + h * dudt).detach()
 
-            # Build valid mask
-            valid_mask = torch.zeros_like(actions, dtype=torch.bool)
-            for action_name, action_idx in self.action_space_index.action_spaces.items():
-                mask = (action_type == action_idx)
-                if mask.any():
-                    adim = self.action_space_index.get_action_dim(action_idx)
-                    mask_expanded = mask.view(-1, 1, 1).expand(-1, actions.size(1), adim).to(device)
-                    valid_mask[mask, :, :adim] = mask_expanded[mask]
+            u_pred_valid = u_pred * valid_mask_f
+            u_tgt_valid = u_tgt * valid_mask_f
+            mf_mse, mf_log = log_lv_loss(u_pred_valid, u_tgt_valid, lv_mf)
 
-            # Compute loss only over valid dimensions
-            diff = u_pred - u_tgt
-            diff = diff * valid_mask.to(dtype=default_dtype)
-            loss_per_sample = (diff ** 2).sum(dim=(1, 2))
-            raw_mse_per_sample = loss_per_sample.detach()
+        # ========== Combine losses ==========
+        loss = 0.5 * (fm_log.mean() + mf_log.mean())
 
-            # Adaptive weighting: normalizes loss to ~1.0 per sample.
-            # This is critical for MeanFlow stability — without it, the
-            # self-referential target u_tgt = v - h*du/dt creates a positive
-            # feedback loop where large du/dt → large loss → large gradients
-            # → even larger du/dt, causing divergence.
-            norm_eps = 0.001
-            norm_p = 0.75
-            adp_wt = (loss_per_sample.detach() + norm_eps) ** norm_p
-            loss_per_sample = loss_per_sample / adp_wt
-
-            loss = loss_per_sample.mean()
-
-        # Monitor metrics
-        with torch.no_grad():
-            valid_u = u_pred[valid_mask]
-            valid_v = v[valid_mask]
-            valid_utgt = u_tgt[valid_mask]
-            v_loss = ((valid_u - valid_v) ** 2).mean()
-            # Raw MSE before adaptive normalization — the real convergence signal
-            raw_mse = raw_mse_per_sample.mean()
-            # Track du/dt magnitude — if this vanishes, the model degenerates
-            # to standard flow and single-step sampling will fail.
-            dudt_norm = dudt[valid_mask].norm(dim=0).mean()
-            # Prediction/target norms
-            u_pred_norm = valid_u.norm(dim=0).mean()
-            u_tgt_norm = valid_utgt.norm(dim=0).mean()
-            # Cosine similarity: u_pred vs u_tgt (training alignment)
-            cos_u_utgt = F.cosine_similarity(
-                valid_u.unsqueeze(0), valid_utgt.unsqueeze(0), dim=-1
-            ).mean()
-            # Cosine similarity: u_pred vs v (single-step convergence)
-            cos_u_v = F.cosine_similarity(
-                valid_u.unsqueeze(0), valid_v.unsqueeze(0), dim=-1
-            ).mean()
-            # Per-timestep-bucket v_loss (where does the model struggle?)
-            t_flat = t.view(-1)
-            low_mask = t_flat < 0.3
-            mid_mask = (t_flat >= 0.3) & (t_flat < 0.7)
-            high_mask = t_flat >= 0.7
-            u_v_diff = (u_pred - v) ** 2 * valid_mask.to(dtype=default_dtype)
-            u_v_per_sample = u_v_diff.sum(dim=(1, 2))
-            vloss_t_low = u_v_per_sample[low_mask].mean() if low_mask.any() else torch.tensor(0.0)
-            vloss_t_mid = u_v_per_sample[mid_mask].mean() if mid_mask.any() else torch.tensor(0.0)
-            vloss_t_high = u_v_per_sample[high_mask].mean() if high_mask.any() else torch.tensor(0.0)
-
-        # Check for NaN/Inf in outputs
-        if torch.isnan(u_pred).any() or torch.isinf(u_pred).any():
-            logger.warning(f"NaN/Inf detected in u_pred! "
-                           f"u_pred stats: min={u_pred.min().item():.4f}, max={u_pred.max().item():.4f}, "
-                           f"z stats: min={z.min().item():.4f}, max={z.max().item():.4f}, "
-                           f"h stats: min={h.min().item():.4f}, max={h.max().item():.4f}")
-
+        # Check for NaN/Inf
         if torch.isnan(loss).any() or torch.isinf(loss).any():
             logger.warning("NaN/Inf detected in loss! Clipping to prevent crash.")
             loss = torch.nan_to_num(loss, nan=1e6, posinf=1e6, neginf=1e6)
 
-        # Verify loss has gradient function
         if loss.grad_fn is None and loss.requires_grad:
-            logger.warning("Loss requires_grad=True but has no grad_fn! "
-                           "This indicates a gradient tracking issue.")
+            logger.warning("Loss requires_grad=True but has no grad_fn!")
         elif not loss.requires_grad:
             logger.error("Loss does not require gradients! Setting requires_grad=True")
             loss.requires_grad_(True)
 
+        # ========== Monitor metrics ==========
+        with torch.no_grad():
+            fm_mse_mean = fm_mse.mean()
+            mf_mse_mean = mf_mse.mean()
+            lv_fm_mean = lv_fm.mean()
+            lv_mf_mean = lv_mf.mean()
+            dudt_norm = dudt[valid_mask].norm(dim=0).mean() if valid_mask.any() else torch.tensor(0.0)
+            # Cosine similarity: u_pred vs v (single-step convergence)
+            valid_u = u_pred[valid_mask]
+            valid_v = v_f32[valid_mask]
+            cos_u_v = F.cosine_similarity(
+                valid_u.unsqueeze(0), valid_v.unsqueeze(0), dim=-1
+            ).mean() if valid_mask.any() else torch.tensor(0.0)
+
         losses_dict = {
-            "loss": loss.item() if not (torch.isnan(loss).any() or torch.isinf(loss).any()) else 1e6,
-            "raw_mse": raw_mse.item(),
-            "v_loss": v_loss.item() if not (torch.isnan(v_loss).any() or torch.isinf(v_loss).any()) else 1e6,
+            "loss": loss.item(),
+            "fm_mse": fm_mse_mean.item(),
+            "mf_mse": mf_mse_mean.item(),
+            "fm_log_loss": fm_log.mean().item(),
+            "mf_log_loss": mf_log.mean().item(),
+            "lv_fm": lv_fm_mean.item(),
+            "lv_mf": lv_mf_mean.item(),
             "dudt_norm": dudt_norm.item(),
-            "u_pred_norm": u_pred_norm.item(),
-            "u_tgt_norm": u_tgt_norm.item(),
-            "cos_u_utgt": cos_u_utgt.item(),
             "cos_u_v": cos_u_v.item(),
-            "vloss_t_low": vloss_t_low.item(),
-            "vloss_t_mid": vloss_t_mid.item(),
-            "vloss_t_high": vloss_t_high.item(),
-            "h_mean": h.mean().item(),
         }
 
         if hasattr(self, 'accelerator') and self.accelerator is not None and wandb.run is not None:
@@ -678,61 +704,46 @@ class MeanFlowerVLA(nn.Module):
 
         return loss, losses_dict
 
-    # === Noise Distribution & Sampling for Mean Flow ===
-    def noise_distribution(self):
-        """Returns the noise distribution function based on config."""
-        if self.noise_dist == 'logit_normal':
-            return self._logit_normal_dist
-        elif self.noise_dist == 'uniform':
-            return self._uniform_dist
-        else:
-            raise ValueError(f"Unknown noise distribution: {self.noise_dist}")
-
-    def _logit_normal_dist(self, bz: int) -> torch.Tensor:
-        """Sample from logit-normal distribution. Math in float32 for stability."""
+    def _logit_normal_sample(self, bz: int, P_mean: torch.Tensor, P_std: torch.Tensor) -> torch.Tensor:
+        """Sample from logit-normal distribution with given mean and std."""
         rnd_normal = torch.randn(
-            bz, 1, 1, 1,
-            device=self.P_mean.device,
+            bz, 1, 1,
+            device=P_mean.device,
             dtype=torch.float32
         )
-        out = torch.sigmoid(
-            rnd_normal * self.P_std.float() + self.P_mean.float()
-        )
+        out = torch.sigmoid(rnd_normal * P_std.float() + P_mean.float())
         return out.to(next(self.parameters()).dtype)
 
-    def _uniform_dist(self, bz: int) -> torch.Tensor:
-        """Sample from uniform distribution."""
-        return torch.rand(
-            bz, 1, 1, 1,
-            device=self.P_mean.device,
-            dtype=next(self.parameters()).dtype
-        )
-
-    def sample_tr(self, b: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def sample_times(self, b: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Sample timesteps t and r with constraint t >= r.
-        `ratio` fraction of samples keep r != t (integral/mean-flow samples).
-        The remaining (1 - ratio) fraction get r = t (instantaneous velocity).
-        Matches py-meanflow reference: ratio=0.75 → 75% integral, 25% velocity.
-
+        DMF-style time sampling. Returns three sets of timesteps:
+        
+        - t_fm: timestep for the flow matching (FM) branch, where r_fm = t_fm
+        - t_mf: timestep for the mean flow (MF) branch (t >= r)
+        - r_mf: query timestep for the MF branch (r <= t)
+        
+        t and r for MF are sampled from *separate* logit-normal distributions
+        with different means, then sorted so t >= r.
+        
+        Reference: DMFLoss.sample_times() in https://github.com/kyungmnlee/dmf
+        
         Returns:
-            t: Sampled timesteps [B, 1, 1, 1]
-            r: Sampled timesteps [B, 1, 1, 1]
+            t_fm: [B, 1, 1] — FM branch timestep
+            t_mf: [B, 1, 1] — MF branch timestep (larger of two samples)
+            r_mf: [B, 1, 1] — MF branch query time (smaller of two samples)
         """
         dtype = next(self.parameters()).dtype
-
-        t = self.noise_distribution()(b).to(device=self.device, dtype=dtype)
-        r = self.noise_distribution()(b).to(device=self.device, dtype=dtype)
-
-        # Ensure t >= r element-wise
-        t, r = torch.maximum(t, r), torch.minimum(t, r)
-
-        # With probability (1 - ratio), collapse to velocity (r = t)
-        prob = torch.rand(b, 1, 1, 1, device=self.device)
-        velocity_mask = prob < (1 - self.ratio)
-        r = torch.where(velocity_mask, t, r)
-
-        return t, r
+        
+        # FM branch: single timestep from shared distribution
+        t_fm = self._logit_normal_sample(b, self.P_mean, self.P_std).to(device=self.device, dtype=dtype)
+        
+        # MF branch: sample t and r from separate distributions, then sort
+        ln_1 = self._logit_normal_sample(b, self.P_mean_t, self.P_std_t).to(device=self.device, dtype=dtype)
+        ln_2 = self._logit_normal_sample(b, self.P_mean_r, self.P_std_r).to(device=self.device, dtype=dtype)
+        t_mf = torch.maximum(ln_1, ln_2)
+        r_mf = torch.minimum(ln_1, ln_2)
+        
+        return t_fm, t_mf, r_mf
 
     # === Sampling Methods ===
     def sample_actions(self, z: torch.Tensor, cond: Dict[str, torch.Tensor], inference: bool = False) -> torch.Tensor:
@@ -761,12 +772,12 @@ class MeanFlowerVLA(nn.Module):
         action_type = cond['action_type']
         
         # MeanFlow: single-step sampling
-        # z_0 = z_1 - u(z_1, t=1, h=1)
+        # z_0 = z_1 - u(z_1, t=1, r=0)
         dtype = next(self.parameters()).dtype
         z = z.to(dtype=dtype)
         t_tensor = torch.ones(b, device=device, dtype=dtype)
-        h_tensor = torch.ones(b, device=device, dtype=dtype)
-        u = self.dit_forward_meanflow(z, t_tensor, h_tensor, cond)
+        r_tensor = torch.zeros(b, device=device, dtype=dtype)  # r=0 for single-step
+        u = self.dit_forward_meanflow(z, t_tensor, r_tensor, cond)
         z = z - u
 
         return z.clamp(-1, 1)
@@ -883,8 +894,8 @@ class MeanFlowerVLA(nn.Module):
     @torch.no_grad()
     def meanflow_eval_loss(self, cond: dict, actions: torch.Tensor) -> dict:
         """
-        Compute ||u(z_t, t, h) - v||² during eval (no JVP needed).
-        Matches the setup of meanflow_loss lines 498-526 but only does a single forward pass.
+        Compute ||u(z_t, t, r) - v||² during eval (no JVP needed).
+        Uses sample_times() and passes r directly.
         """
         default_dtype = next(self.parameters()).dtype
         action_type = cond['action_type']
@@ -894,10 +905,10 @@ class MeanFlowerVLA(nn.Module):
         device = actions.device
         actions = actions.to(dtype=default_dtype)
 
-        # Sample t and r
-        t, r = self.sample_tr(b)
+        # Sample t and r using DMF sampling
+        _, t_mf, r_mf = self.sample_times(b)
 
-        texp = t.view([b] + [1] * (actions.dim() - 1)).to(dtype=default_dtype)
+        texp = t_mf.to(dtype=default_dtype)
 
         # Sample noise per action space
         e = torch.zeros_like(actions)
@@ -914,14 +925,12 @@ class MeanFlowerVLA(nn.Module):
         z = (1 - texp) * actions + texp * e
         v = e - actions  # target velocity
 
-        # Compute h = t - r
-        h_val = t - r
-        t_flat = t.view(-1)
-        h_flat = h_val.view(-1)
+        t_flat = t_mf.view(-1)
+        r_flat = r_mf.view(-1)
 
         # Single forward pass
         with torch.autocast('cuda', dtype=torch.bfloat16):
-            u_pred = self.dit_forward_meanflow(z, t_flat, h_flat, cond)
+            u_pred = self.dit_forward_meanflow(z, t_flat, r_flat, cond)
 
         # Per-sample ||u - v||² over valid action dims
         per_sample_loss = torch.zeros(b, device=device)
@@ -937,15 +946,21 @@ class MeanFlowerVLA(nn.Module):
 
         return {"loss": per_sample_loss.detach()}
 
-    def dit_forward_meanflow(self, z: torch.Tensor, t: torch.Tensor, h: torch.Tensor, cond_dict: dict) -> torch.Tensor:
+    def dit_forward_meanflow(self, z: torch.Tensor, t: torch.Tensor, r: torch.Tensor,
+                             cond_dict: dict, return_logvar: bool = False):
         """
-        Forward pass through the DiT blocks using MeanFlowDecoder.
+        Forward pass through the DMF DiT (encoder conditioned on t, decoder on r).
 
         Args:
             z: Latent actions [B, T, action_dim]
-            t: Current timestep [B]
-            h: Timestep difference (t - r) [B]
+            t: Encoder timestep [B]
+            r: Decoder query timestep [B]
             cond_dict: Conditioning dictionary
+            return_logvar: If True, also return log-variance scalar for loss weighting
+
+        Returns:
+            decoded: Action predictions [B, T, action_dim]
+            logvar (optional): Log-variance [B, 1, 1] (only if return_logvar=True)
         """
         B, t_seq, d = z.shape
         working_dtype = z.dtype  # float32 during JVP, bf16 during inference
@@ -967,27 +982,53 @@ class MeanFlowerVLA(nn.Module):
             freq_embeds = freq_embeds * (1 - drop_mask)
             proprio_embeds = proprio_embeds * (1 - drop_mask)
 
-        # Compute temporal embedding
-        t_emb = sum(map(stateless_norm, [self.t_embedder(t), freq_embeds, proprio_embeds]))
+        # Shared additive signals (frequency, proprio, action space)
+        shared_signals = sum(map(stateless_norm, [freq_embeds, proprio_embeds]))
 
-        # Compute global conditioning
+        # Encoder conditioning: t
+        t_emb = stateless_norm(self.t_embedder(t)) + shared_signals
+        # Decoder conditioning: r
+        r_emb = stateless_norm(self.r_embedder(r)) + shared_signals
+
+        # Optionally add VLM global conditioning
         if self.use_adaln_cond:
-            global_cond = cond[:, 0, :] if self.use_readout_token else cond.mean(dim=1)
-            global_cond += t_emb
+            global_cond_base = cond[:, 0, :] if self.use_readout_token else cond.mean(dim=1)
+            t_cond = global_cond_base + t_emb
+            r_cond = global_cond_base + r_emb
         else:
-            global_cond = t_emb
+            t_cond = t_emb
+            r_cond = r_emb
 
         context = cond if self.use_cross_attn else None
 
-        # Compute AdaLN modulation
-        global_adaln = self.adaln(global_cond) if not self.action_type_adaln else self.action_specific_adaln(global_cond, action_type)
+        # Separate AdaLN modulation for encoder (t) and decoder (r)
+        if self.action_type_adaln:
+            t_global_adaln = self.action_specific_adaln(t_cond, action_type)
+            r_global_adaln = self.action_specific_adaln(r_cond, action_type)
+        else:
+            t_global_adaln = self.adaln_t(t_cond)
+            r_global_adaln = self.adaln_r(r_cond)
 
-        for layer in self.dit:
-            z = layer(z, global_cond, context=context, custom_attn_mask=None,
-                    custom_cross_attn_mask=cond_dict['attention_mask'], is_causal=True, global_adaln=global_adaln)
+        # DMFTransformer: encoder blocks use t_cond, decoder blocks use r_cond
+        z = self.dit(
+            z, t_cond, r_cond,
+            context=context,
+            custom_attn_mask=None,
+            custom_cross_attn_mask=cond_dict['attention_mask'],
+            is_causal=True,
+            t_global_adaln=t_global_adaln,
+            r_global_adaln=r_global_adaln
+        )
 
-        # Decode actions with h-conditioned MeanFlowDecoder
-        return self.decode_actions_meanflow(z, h, action_type, valid_dims)
+        decoded = self.decode_actions_meanflow(z, action_type, valid_dims)
+
+        if return_logvar:
+            logvar = self.logvar_linear(
+                torch.cat([logvar_timestep_embedding(t), logvar_timestep_embedding(r)], dim=1)
+            )
+            logvar = logvar.view(-1, *[1] * (decoded.ndim - 1))  # [B, 1, 1]
+            return decoded, logvar
+        return decoded
 
     def encode_proprio(self, proprio: torch.Tensor, action_type: torch.Tensor, output_shape) -> torch.Tensor:
         """
