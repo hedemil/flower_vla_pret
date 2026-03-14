@@ -2,10 +2,10 @@ defaults:
   - datamodule: oxe_data
   - trainer: meanflower_trainer
 
-DATA_NAME: libero_all
+DATA_NAME: simulation_all # libero_all
 
 wandb:
-  name: finetune_libero_${now:%H-%M-%S}
+  name: finetune_simulation_${now:%H-%M-%S}
   group: finetuning_${now:%Y-%m-%d}
   project: OXE_pretraining
   entity: bennoq

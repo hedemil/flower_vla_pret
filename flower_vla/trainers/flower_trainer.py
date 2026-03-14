@@ -938,17 +938,12 @@ class AccelerateTrainer:
             if map_weights:
                 log.info("Attempting to map weights by matching key patterns")
                 new_state_dict = {}
-                model_keys = dict(base_model.named_parameters())
-                model_keys.update(dict(base_model.named_buffers()))
 
                 # Try to match keys by removing prefixes or finding similar patterns
                 for k, v in state_dict.items():
                     # Try different variations to match keys
                     clean_k = k.replace('agent.', '').replace('module.', '')
-                    if clean_k in model_keys:
-                        new_state_dict[clean_k] = v
-                    elif 'agent.' + clean_k in model_keys:
-                        new_state_dict['agent.' + clean_k] = v
+                    new_state_dict[clean_k] = v
 
                 if len(new_state_dict) > 0:
                     log.info(f"Successfully mapped {len(new_state_dict)}/{len(state_dict)} keys")
@@ -956,7 +951,9 @@ class AccelerateTrainer:
                 else:
                     log.warning("Could not map any keys, falling back to original state dict")
 
-            # Apply structural weight mapping (e.g. FlowerVLA → DMF architecture)
+            # Apply structural weight mapping BEFORE model key filtering
+            # (must run before filtering so dit.{i}.* keys can be remapped to
+            #  dit.encoder_blocks.{i}.* / dit.decoder_blocks.{j}.*)
             if map_type == 'flower_to_dmf':
                 from flower_vla.utils.model_loading import map_flower_to_meanflower
                 state_dict = map_flower_to_meanflower(state_dict)
