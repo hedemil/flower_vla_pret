@@ -130,6 +130,10 @@ def map_flower_to_meanflower(state_dict: Dict[str, torch.Tensor],
                 new_sd[k] = v
                 continue
             rest = '.'.join(parts[2:])
+            # Rename MLP keys: FLOWER uses c_fc1/c_fc2/c_proj, DMF uses fc1/fc2/proj
+            rest = rest.replace('mlp.c_fc1', 'mlp.fc1') \
+                       .replace('mlp.c_fc2', 'mlp.fc2') \
+                       .replace('mlp.c_proj', 'mlp.proj')
             if layer_idx < n_encoder_layers:
                 new_sd[f'dit.encoder_blocks.{layer_idx}.{rest}'] = v
             else:
