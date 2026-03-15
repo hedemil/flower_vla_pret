@@ -41,7 +41,7 @@ def logvar_timestep_embedding(t, dim=128, max_period=10000):
     return torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
 
 
-def log_lv_loss(x, y, lv, eps=0.01):
+def log_lv_loss(x, y, lv, valid_dims_count=None, eps=0.01):
     """
     Log-variance weighted loss from DMF (Decoupled MeanFlow).
 
@@ -49,6 +49,9 @@ def log_lv_loss(x, y, lv, eps=0.01):
         x: prediction [B, T, D]
         y: target [B, T, D]
         lv: log-variance scalar [B, 1, 1] (predicted by model)
+        valid_dims_count: [B] number of valid (non-padded) elements per sample.
+            If provided, mean_loss = sum / valid_dims_count instead of torch.mean,
+            avoiding dilution from zero-padded dimensions.
         eps: numerical stability constant
 
     Returns:
@@ -57,7 +60,10 @@ def log_lv_loss(x, y, lv, eps=0.01):
     """
     err = (x - y) ** 2
     mse_loss = torch.sum(err, dim=list(range(1, len(x.shape))))
-    mean_loss = torch.mean(err, dim=list(range(1, len(x.shape))))
+    if valid_dims_count is not None:
+        mean_loss = mse_loss / valid_dims_count.clamp(min=1)
+    else:
+        mean_loss = torch.mean(err, dim=list(range(1, len(x.shape))))
     log_loss = torch.log((1 / lv.exp()) * mean_loss + eps) + lv
     return mse_loss, log_loss
 
@@ -587,6 +593,7 @@ class MeanFlowerVLA(nn.Module):
                 valid_mask[mask, :, :adim] = mask_expanded[mask]
 
         valid_mask_f = valid_mask.to(dtype=torch.float32)
+        valid_dims_count = valid_mask_f.sum(dim=list(range(1, valid_mask_f.ndim)))  # [B]
 
         # Construct shared z_t
         t_exp = t.to(dtype=default_dtype)
@@ -729,7 +736,7 @@ class MeanFlowerVLA(nn.Module):
             # ========== Compute losses ==========
             v_pred_valid = v_pred * valid_mask_f
             v_target_valid = v_f32 * valid_mask_f
-            fm_mse, fm_log = log_lv_loss(v_pred_valid, v_target_valid, lv_fm)
+            fm_mse, fm_log = log_lv_loss(v_pred_valid, v_target_valid, lv_fm, valid_dims_count=valid_dims_count)
 
             # u_tgt = v + (r - t) * du/dt  (DMF sign convention)
             gap = (r_f32 - t.float())  # negative since r <= t
@@ -737,7 +744,7 @@ class MeanFlowerVLA(nn.Module):
 
             u_pred_valid = u_pred * valid_mask_f
             u_tgt_valid = u_tgt * valid_mask_f
-            mf_mse, mf_log = log_lv_loss(u_pred_valid, u_tgt_valid, lv_mf)
+            mf_mse, mf_log = log_lv_loss(u_pred_valid, u_tgt_valid, lv_mf, valid_dims_count=valid_dims_count)
 
         # ========== Combine losses ==========
         loss = 0.5 * (fm_log.mean() + mf_log.mean())
