@@ -543,13 +543,13 @@ class MeanFlowerVLA(nn.Module):
     # === Loss Functions ===
     def meanflow_loss(self, cond: dict, actions: torch.Tensor, dataset_idx: Any = None) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
-        Computes the Decoupled MeanFlow (DMF) dual loss with log-variance weighting.
+        Computes the Decoupled MeanFlow (DMF) dual loss with shared encoder.
 
-        Two branches:
-          FM branch: standard flow matching (r = t), no JVP needed
-          MF branch: mean flow (r ≠ t), uses JVP for du/dt
+        Both branches share a single encoder pass with the same (z_t, t):
+          FM branch: decoder with r = t (no JVP needed)
+          MF branch: decoder with r < t (JVP through encoder + decoder)
 
-        Both branches use learned log-variance weighting instead of adaptive loss/(loss+eps)^p.
+        Encoder sharing saves ~27% DiT compute vs two independent forward passes.
         Reference: https://github.com/kyungmnlee/dmf
         """
         default_dtype = next(self.parameters()).dtype
@@ -560,8 +560,8 @@ class MeanFlowerVLA(nn.Module):
         device = actions.device
         actions = actions.to(dtype=default_dtype)
 
-        # Sample timesteps: t_fm for FM branch, (t_mf, r_mf) for MF branch
-        t_fm, t_mf, r_mf = self.sample_times(b)
+        # Sample shared timesteps: both branches use same t; FM uses r=t, MF uses r<t
+        t, r = self.sample_times(b)
 
         # Sample noise per action space
         e = torch.zeros_like(actions)
@@ -588,6 +588,15 @@ class MeanFlowerVLA(nn.Module):
 
         valid_mask_f = valid_mask.to(dtype=torch.float32)
 
+        # Construct shared z_t
+        t_exp = t.to(dtype=default_dtype)
+        z_t = (1 - t_exp) * actions + t_exp * e
+        z_t = z_t.float()
+        v_f32 = v.float()
+        t_flat = t.view(-1).float()
+        r_flat = r.view(-1).float()
+        r_f32 = r.float()
+
         # Monkey-patch nn.Linear and RmsNorm for dtype safety (bf16 weights + f32 inputs)
         _orig_linear_forward = nn.Linear.forward
         _orig_rmsnorm_forward = RmsNorm.forward
@@ -602,63 +611,129 @@ class MeanFlowerVLA(nn.Module):
         def _jvp_safe_rmsnorm_forward(self, x):
             return F.rms_norm(x, self.normalized_shape, self.weight.to(x.dtype), self.eps)
 
-        # ========== FM branch (r = t, no JVP) ==========
-        t_fm_exp = t_fm.to(dtype=default_dtype)
-        z_fm = (1 - t_fm_exp) * actions + t_fm_exp * e
-        z_fm = z_fm.float()
+        # ========== Prepare conditioning (outside JVP — doesn't depend on z) ==========
+        working_dtype = z_t.dtype  # float32
+        vlm_features = self.cond_linear(self.cond_norm(cond['features'].to(working_dtype)))
+        freq_embeds = cond['frequency_embeds'].squeeze(1).to(working_dtype)
+        action_type_dev = cond['action_type'].to(self.device)
+        proprio = cond.get('proprio', torch.zeros_like(freq_embeds)).to(working_dtype) if self.use_proprio else torch.zeros_like(freq_embeds)
+        proprio_embeds = self.encode_proprio(proprio, action_type_dev, freq_embeds.shape).to(working_dtype)
 
-        t_fm_flat = t_fm.view(-1).float()
+        # Apply CFG dropout on freq_embeds and proprio_embeds
+        if self.training and self.cfg_dropout > 0:
+            drop_mask = (torch.rand(freq_embeds.size(0), device=freq_embeds.device) < self.cfg_dropout).to(dtype=working_dtype).unsqueeze(1)
+            freq_embeds = freq_embeds * (1 - drop_mask)
+            proprio_embeds = proprio_embeds * (1 - drop_mask)
+
+        shared_signals = sum(map(stateless_norm, [freq_embeds, proprio_embeds]))
+
+        # Encoder conditioning (t) — shared between both branches
+        t_emb = stateless_norm(self.t_embedder(t_flat.detach())) + shared_signals
+        if self.use_adaln_cond:
+            global_cond_base = vlm_features[:, 0, :] if self.use_readout_token else vlm_features.mean(dim=1)
+            t_cond = global_cond_base + t_emb
+        else:
+            t_cond = t_emb
+
+        context = vlm_features if self.use_cross_attn else None
+        cross_attn_mask = cond['attention_mask']
+
+        if self.action_type_adaln:
+            t_global_adaln = self.action_specific_adaln(t_cond, action_type_dev)
+        else:
+            t_global_adaln = self.adaln_t(t_cond)
+
+        # Decoder conditioning for FM (r=t) and MF (r<t)
+        r_fm_emb = stateless_norm(self.r_embedder(t_flat.detach())) + shared_signals  # r=t for FM
+        r_mf_emb = stateless_norm(self.r_embedder(r_flat.detach())) + shared_signals  # r<t for MF
+        if self.use_adaln_cond:
+            r_fm_cond = global_cond_base + r_fm_emb
+            r_mf_cond = global_cond_base + r_mf_emb
+        else:
+            r_fm_cond = r_fm_emb
+            r_mf_cond = r_mf_emb
+
+        if self.action_type_adaln:
+            r_fm_global_adaln = self.action_specific_adaln(r_fm_cond, action_type_dev)
+            r_mf_global_adaln = self.action_specific_adaln(r_mf_cond, action_type_dev)
+        else:
+            r_fm_global_adaln = self.adaln_r(r_fm_cond)
+            r_mf_global_adaln = self.adaln_r(r_mf_cond)
+
+        # Precompute valid_dims (same content as from encode_actions, avoids redundant call)
+        _, valid_dims = self.encode_actions(z_t, action_type_dev)
+
         with torch.amp.autocast("cuda", enabled=False):
             nn.Linear.forward = _jvp_safe_linear_forward
             RmsNorm.forward = _jvp_safe_rmsnorm_forward
             try:
-                v_pred, lv_fm = self.dit_forward_meanflow(
-                    z_fm, t_fm_flat, t_fm_flat, cond, return_logvar=True
+                # ========== Shared encoder JVP ==========
+                # enc_fn captures all conditioning via closure; only z has non-zero tangent
+                def enc_fn(z_input):
+                    z_enc, _ = self.encode_actions(z_input, action_type_dev)
+                    if not (self.use_rope or self.use_nope):
+                        z_enc = z_enc + self.positional_encoding
+                    h = self.dit.encode(
+                        z_enc, t_cond,
+                        context=context,
+                        custom_attn_mask=None,
+                        custom_cross_attn_mask=cross_attn_mask,
+                        is_causal=True,
+                        t_global_adaln=t_global_adaln
+                    )
+                    return h
+
+                (h, dh) = torch.func.jvp(enc_fn, (z_t,), (v_f32,))
+
+                # ========== FM decoder forward (r=t, no JVP) ==========
+                z_fm_dec = self.dit.decode(
+                    h, r_fm_cond,
+                    context=context,
+                    custom_attn_mask=None,
+                    custom_cross_attn_mask=cross_attn_mask,
+                    is_causal=True,
+                    r_global_adaln=r_fm_global_adaln
                 )
+                v_pred = self.decode_actions_meanflow(z_fm_dec, action_type_dev, valid_dims)
+
+                # FM logvar (depends only on t,r — not on z)
+                lv_fm = self.logvar_linear(
+                    torch.cat([logvar_timestep_embedding(t_flat), logvar_timestep_embedding(t_flat)], dim=1)
+                )
+                lv_fm = lv_fm.view(-1, *[1] * (v_pred.ndim - 1))
+
+                # ========== MF decoder JVP ==========
+                def dec_fn(h_input):
+                    z_dec = self.dit.decode(
+                        h_input, r_mf_cond,
+                        context=context,
+                        custom_attn_mask=None,
+                        custom_cross_attn_mask=cross_attn_mask,
+                        is_causal=True,
+                        r_global_adaln=r_mf_global_adaln
+                    )
+                    return self.decode_actions_meanflow(z_dec, action_type_dev, valid_dims)
+
+                (u_pred, dudt) = torch.func.jvp(dec_fn, (h,), (dh,))
+
+                # MF logvar
+                lv_mf = self.logvar_linear(
+                    torch.cat([logvar_timestep_embedding(t_flat), logvar_timestep_embedding(r_flat)], dim=1)
+                )
+                lv_mf = lv_mf.view(-1, *[1] * (u_pred.ndim - 1))
+
             finally:
                 nn.Linear.forward = _orig_linear_forward
                 RmsNorm.forward = _orig_rmsnorm_forward
 
-        v_pred_valid = v_pred * valid_mask_f
-        v_target_valid = v.float() * valid_mask_f
-        fm_mse, fm_log = log_lv_loss(v_pred_valid, v_target_valid, lv_fm)
-
-        # ========== MF branch (r ≠ t, uses JVP) ==========
-        t_mf_exp = t_mf.to(dtype=default_dtype)
-        z_mf = (1 - t_mf_exp) * actions + t_mf_exp * e
-
-        # Cast to float32 for JVP
-        z_mf = z_mf.float()
-        v_f32 = v.float()
-        t_mf_exp_f32 = t_mf_exp.float()
-        r_mf_exp_f32 = r_mf.to(dtype=torch.float32)
-
-        # Define network function for JVP
-        def u_func(z_input, t_input, r_input):
-            t_flat = t_input.detach().view(-1)   # zero tangent through t_embedder
-            r_flat = r_input.detach().view(-1)   # zero tangent through r_embedder
-            return self.dit_forward_meanflow(z_input, t_flat, r_flat, cond, return_logvar=True)
-
-        # Tangent vectors for JVP
-        dtdt = torch.ones_like(t_mf_exp_f32)
-        drdt = torch.zeros_like(r_mf_exp_f32)
-
-        with torch.amp.autocast("cuda", enabled=False):
-            nn.Linear.forward = _jvp_safe_linear_forward
-            RmsNorm.forward = _jvp_safe_rmsnorm_forward
-            try:
-                (u_pred, lv_mf), (dudt, _) = torch.func.jvp(
-                    u_func,
-                    (z_mf, t_mf_exp_f32, r_mf_exp_f32),
-                    (v_f32, dtdt, drdt)
-                )
-            finally:
-                nn.Linear.forward = _orig_linear_forward
-                RmsNorm.forward = _orig_rmsnorm_forward
+            # ========== Compute losses ==========
+            v_pred_valid = v_pred * valid_mask_f
+            v_target_valid = v_f32 * valid_mask_f
+            fm_mse, fm_log = log_lv_loss(v_pred_valid, v_target_valid, lv_fm)
 
             # u_tgt = v + (r - t) * du/dt  (DMF sign convention)
-            h = (r_mf_exp_f32 - t_mf_exp_f32)  # negative since r <= t
-            u_tgt = (v_f32 + h * dudt).detach()
+            gap = (r_f32 - t.float())  # negative since r <= t
+            u_tgt = (v_f32 + gap * dudt).detach()
 
             u_pred_valid = u_pred * valid_mask_f
             u_tgt_valid = u_tgt * valid_mask_f
@@ -729,36 +804,25 @@ class MeanFlowerVLA(nn.Module):
         out = torch.sigmoid(rnd_normal * P_std.float() + P_mean.float())
         return out.to(next(self.parameters()).dtype)
 
-    def sample_times(self, b: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def sample_times(self, b: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        DMF-style time sampling. Returns three sets of timesteps:
-        
-        - t_fm: timestep for the flow matching (FM) branch, where r_fm = t_fm
-        - t_mf: timestep for the mean flow (MF) branch (t >= r)
-        - r_mf: query timestep for the MF branch (r <= t)
-        
-        t and r for MF are sampled from *separate* logit-normal distributions
-        with different means, then sorted so t >= r.
-        
-        Reference: DMFLoss.sample_times() in https://github.com/kyungmnlee/dmf
-        
+        Shared-encoder DMF time sampling. Both branches share the same t;
+        FM uses r=t, MF uses r<t.
+
+        Two logit-normal samples are drawn and sorted so t >= r.
+
         Returns:
-            t_fm: [B, 1, 1] — FM branch timestep
-            t_mf: [B, 1, 1] — MF branch timestep (larger of two samples)
-            r_mf: [B, 1, 1] — MF branch query time (smaller of two samples)
+            t: [B, 1, 1] — shared encoder timestep (larger of two samples)
+            r: [B, 1, 1] — MF branch query time (smaller of two samples)
         """
         dtype = next(self.parameters()).dtype
-        
-        # FM branch: single timestep from shared distribution
-        t_fm = self._logit_normal_sample(b, self.P_mean, self.P_std).to(device=self.device, dtype=dtype)
-        
-        # MF branch: sample t and r from separate distributions, then sort
+
         ln_1 = self._logit_normal_sample(b, self.P_mean_t, self.P_std_t).to(device=self.device, dtype=dtype)
         ln_2 = self._logit_normal_sample(b, self.P_mean_r, self.P_std_r).to(device=self.device, dtype=dtype)
-        t_mf = torch.maximum(ln_1, ln_2)
-        r_mf = torch.minimum(ln_1, ln_2)
-        
-        return t_fm, t_mf, r_mf
+        t = torch.maximum(ln_1, ln_2)
+        r = torch.minimum(ln_1, ln_2)
+
+        return t, r
 
     # === Sampling Methods ===
     def sample_actions(self, z: torch.Tensor, cond: Dict[str, torch.Tensor], inference: bool = False) -> torch.Tensor:
@@ -921,7 +985,7 @@ class MeanFlowerVLA(nn.Module):
         actions = actions.to(dtype=default_dtype)
 
         # Sample t and r using DMF sampling
-        _, t_mf, r_mf = self.sample_times(b)
+        t_mf, r_mf = self.sample_times(b)
 
         texp = t_mf.to(dtype=default_dtype)
 

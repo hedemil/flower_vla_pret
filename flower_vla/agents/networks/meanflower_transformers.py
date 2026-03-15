@@ -471,32 +471,47 @@ class DMFTransformer(nn.Module):
             ) for _ in range(n_decoder_layers)
         ])
     
-    def forward(self, z, t_cond, r_cond, context=None,
-                custom_attn_mask=None, custom_cross_attn_mask=None,
-                is_causal=False, t_global_adaln=None, r_global_adaln=None):
+    def encode(self, z, t_cond, context=None,
+               custom_attn_mask=None, custom_cross_attn_mask=None,
+               is_causal=False, t_global_adaln=None):
         """
-        Args:
-            z: Action latents [B, L, D]
-            t_cond: Global conditioning from t [B, D]
-            r_cond: Global conditioning from r [B, D]
-            context: VLM features for cross-attention
-            t_global_adaln: AdaLN signals for encoder (from t)
-            r_global_adaln: AdaLN signals for decoder (from r)
+        Encoder pass only: processes z with timestep t conditioning.
+        Returns hidden state h for use by decode().
         """
-        # Encoder pass: conditioned on t
         for layer in self.encoder_blocks:
             z = layer(z, t_cond, context=context,
                       custom_attn_mask=custom_attn_mask,
                       custom_cross_attn_mask=custom_cross_attn_mask,
                       is_causal=is_causal, global_adaln=t_global_adaln)
-        
-        # Decoder pass: conditioned on r
+        return z
+
+    def decode(self, h, r_cond, context=None,
+               custom_attn_mask=None, custom_cross_attn_mask=None,
+               is_causal=False, r_global_adaln=None):
+        """
+        Decoder pass only: takes encoder output h and produces u(z_t, t, r).
+        """
         for layer in self.decoder_blocks:
-            z = layer(z, r_cond, context=context,
+            h = layer(h, r_cond, context=context,
                       custom_attn_mask=custom_attn_mask,
                       custom_cross_attn_mask=custom_cross_attn_mask,
                       is_causal=is_causal, global_adaln=r_global_adaln)
-        
+        return h
+
+    def forward(self, z, t_cond, r_cond, context=None,
+                custom_attn_mask=None, custom_cross_attn_mask=None,
+                is_causal=False, t_global_adaln=None, r_global_adaln=None):
+        """
+        Full forward pass (encoder + decoder). Used by inference and eval.
+        """
+        z = self.encode(z, t_cond, context=context,
+                        custom_attn_mask=custom_attn_mask,
+                        custom_cross_attn_mask=custom_cross_attn_mask,
+                        is_causal=is_causal, t_global_adaln=t_global_adaln)
+        z = self.decode(z, r_cond, context=context,
+                        custom_attn_mask=custom_attn_mask,
+                        custom_cross_attn_mask=custom_cross_attn_mask,
+                        is_causal=is_causal, r_global_adaln=r_global_adaln)
         return z
 
 
