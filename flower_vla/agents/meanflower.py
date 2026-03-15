@@ -611,62 +611,62 @@ class MeanFlowerVLA(nn.Module):
         def _jvp_safe_rmsnorm_forward(self, x):
             return F.rms_norm(x, self.normalized_shape, self.weight.to(x.dtype), self.eps)
 
-        # ========== Prepare conditioning (outside JVP — doesn't depend on z) ==========
-        working_dtype = z_t.dtype  # float32
-        vlm_features = self.cond_linear(self.cond_norm(cond['features'].to(working_dtype)))
-        freq_embeds = cond['frequency_embeds'].squeeze(1).to(working_dtype)
-        action_type_dev = cond['action_type'].to(self.device)
-        proprio = cond.get('proprio', torch.zeros_like(freq_embeds)).to(working_dtype) if self.use_proprio else torch.zeros_like(freq_embeds)
-        proprio_embeds = self.encode_proprio(proprio, action_type_dev, freq_embeds.shape).to(working_dtype)
-
-        # Apply CFG dropout on freq_embeds and proprio_embeds
-        if self.training and self.cfg_dropout > 0:
-            drop_mask = (torch.rand(freq_embeds.size(0), device=freq_embeds.device) < self.cfg_dropout).to(dtype=working_dtype).unsqueeze(1)
-            freq_embeds = freq_embeds * (1 - drop_mask)
-            proprio_embeds = proprio_embeds * (1 - drop_mask)
-
-        shared_signals = sum(map(stateless_norm, [freq_embeds, proprio_embeds]))
-
-        # Encoder conditioning (t) — shared between both branches
-        t_emb = stateless_norm(self.t_embedder(t_flat.detach())) + shared_signals
-        if self.use_adaln_cond:
-            global_cond_base = vlm_features[:, 0, :] if self.use_readout_token else vlm_features.mean(dim=1)
-            t_cond = global_cond_base + t_emb
-        else:
-            t_cond = t_emb
-
-        context = vlm_features if self.use_cross_attn else None
-        cross_attn_mask = cond['attention_mask']
-
-        if self.action_type_adaln:
-            t_global_adaln = self.action_specific_adaln(t_cond, action_type_dev)
-        else:
-            t_global_adaln = self.adaln_t(t_cond)
-
-        # Decoder conditioning for FM (r=t) and MF (r<t)
-        r_fm_emb = stateless_norm(self.r_embedder(t_flat.detach())) + shared_signals  # r=t for FM
-        r_mf_emb = stateless_norm(self.r_embedder(r_flat.detach())) + shared_signals  # r<t for MF
-        if self.use_adaln_cond:
-            r_fm_cond = global_cond_base + r_fm_emb
-            r_mf_cond = global_cond_base + r_mf_emb
-        else:
-            r_fm_cond = r_fm_emb
-            r_mf_cond = r_mf_emb
-
-        if self.action_type_adaln:
-            r_fm_global_adaln = self.action_specific_adaln(r_fm_cond, action_type_dev)
-            r_mf_global_adaln = self.action_specific_adaln(r_mf_cond, action_type_dev)
-        else:
-            r_fm_global_adaln = self.adaln_r(r_fm_cond)
-            r_mf_global_adaln = self.adaln_r(r_mf_cond)
-
-        # Precompute valid_dims (same content as from encode_actions, avoids redundant call)
-        _, valid_dims = self.encode_actions(z_t, action_type_dev)
-
         with torch.amp.autocast("cuda", enabled=False):
             nn.Linear.forward = _jvp_safe_linear_forward
             RmsNorm.forward = _jvp_safe_rmsnorm_forward
             try:
+                # ========== Prepare conditioning (outside JVP — doesn't depend on z) ==========
+                working_dtype = z_t.dtype  # float32
+                vlm_features = self.cond_linear(self.cond_norm(cond['features'].to(working_dtype)))
+                freq_embeds = cond['frequency_embeds'].squeeze(1).to(working_dtype)
+                action_type_dev = cond['action_type'].to(self.device)
+                proprio = cond.get('proprio', torch.zeros_like(freq_embeds)).to(working_dtype) if self.use_proprio else torch.zeros_like(freq_embeds)
+                proprio_embeds = self.encode_proprio(proprio, action_type_dev, freq_embeds.shape).to(working_dtype)
+
+                # Apply CFG dropout on freq_embeds and proprio_embeds
+                if self.training and self.cfg_dropout > 0:
+                    drop_mask = (torch.rand(freq_embeds.size(0), device=freq_embeds.device) < self.cfg_dropout).to(dtype=working_dtype).unsqueeze(1)
+                    freq_embeds = freq_embeds * (1 - drop_mask)
+                    proprio_embeds = proprio_embeds * (1 - drop_mask)
+
+                shared_signals = sum(map(stateless_norm, [freq_embeds, proprio_embeds]))
+
+                # Encoder conditioning (t) — shared between both branches
+                t_emb = stateless_norm(self.t_embedder(t_flat.detach())) + shared_signals
+                if self.use_adaln_cond:
+                    global_cond_base = vlm_features[:, 0, :] if self.use_readout_token else vlm_features.mean(dim=1)
+                    t_cond = global_cond_base + t_emb
+                else:
+                    t_cond = t_emb
+
+                context = vlm_features if self.use_cross_attn else None
+                cross_attn_mask = cond['attention_mask']
+
+                if self.action_type_adaln:
+                    t_global_adaln = self.action_specific_adaln(t_cond, action_type_dev)
+                else:
+                    t_global_adaln = self.adaln_t(t_cond)
+
+                # Decoder conditioning for FM (r=t) and MF (r<t)
+                r_fm_emb = stateless_norm(self.r_embedder(t_flat.detach())) + shared_signals  # r=t for FM
+                r_mf_emb = stateless_norm(self.r_embedder(r_flat.detach())) + shared_signals  # r<t for MF
+                if self.use_adaln_cond:
+                    r_fm_cond = global_cond_base + r_fm_emb
+                    r_mf_cond = global_cond_base + r_mf_emb
+                else:
+                    r_fm_cond = r_fm_emb
+                    r_mf_cond = r_mf_emb
+
+                if self.action_type_adaln:
+                    r_fm_global_adaln = self.action_specific_adaln(r_fm_cond, action_type_dev)
+                    r_mf_global_adaln = self.action_specific_adaln(r_mf_cond, action_type_dev)
+                else:
+                    r_fm_global_adaln = self.adaln_r(r_fm_cond)
+                    r_mf_global_adaln = self.adaln_r(r_mf_cond)
+
+                # Precompute valid_dims (same content as from encode_actions, avoids redundant call)
+                _, valid_dims = self.encode_actions(z_t, action_type_dev)
+
                 # ========== Shared encoder JVP ==========
                 # enc_fn captures all conditioning via closure; only z has non-zero tangent
                 def enc_fn(z_input):
