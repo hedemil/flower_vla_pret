@@ -64,9 +64,9 @@ def log_lv_loss(x, y, lv, valid_dims_count=None, eps=0.01):
     else:
         mean_loss = torch.mean(err, dim=list(range(1, len(x.shape))))
     # Gaussian NLL: log(exp(-φ) * mean_loss + eps) + φ
+    # Squeeze lv to [B] to match mean_loss shape and avoid broadcast misalignment
+    lv = lv.view(x.shape[0])
     log_loss = torch.log(torch.exp(-lv) * mean_loss + eps) + lv
-    # Squeeze to [B] in case lv broadcasts extra dims
-    log_loss = log_loss.view(x.shape[0])
     return mse_loss, log_loss
 
 
