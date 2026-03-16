@@ -1,5 +1,31 @@
 # MeanFlower VLA - Changelog
 
+## [2026-03-15] Fix log_lv_loss mean dilution from zero-padded action dimensions
+
+**Problem**: DMF training shows oscillating metrics and slow val_loss improvement (0.319 → 0.312 over 20k steps). `log_lv_loss()` computes `mean_loss = torch.mean(err, ...)` over ALL dimensions including zero-padded invalid ones. Action spaces have different dims (eef_delta=7, joint_single=8, bimanual_nav=16) but tensors are padded to max=16, diluting the mean by up to 2.29x for smaller action spaces. This causes unequal gradient pressure across datasets.
+
+**Root cause**: Unlike `flower.py` which boolean-indexes valid elements before averaging (`diff[valid_mask].mean()` → correct scalar), `meanflower.py` needs per-sample `mean_loss` (shape `[B]`) for the log-variance weighting `log(exp(-lv) * mean_loss + eps) + lv`, where `lv` is per-sample (each sample has a different timestep). Boolean indexing flattens across the batch, losing sample identity, so the code used `torch.mean` over the full padded tensor instead — incorrectly including zeros.
+
+**Fix**: Compute `valid_dims_count` from the existing `valid_mask_f` and divide `mse_loss` (sum) by it, instead of using `torch.mean` over padded dimensions.
+
+| Action space | Dims | Dilution before fix | After fix |
+|-------------|------|--------------------:|----------:|
+| eef_delta | 7 | 16/7 = 2.29x too low | 1.00x |
+| joint_single | 8 | 16/8 = 2.00x too low | 1.00x |
+| bimanual_nav | 16 | 1.00x | 1.00x |
+
+**Code changes:**
+
+| Change | File | Rationale |
+|--------|------|-----------|
+| Add `valid_dims_count` param to `log_lv_loss()` | `meanflower.py` | When provided, `mean_loss = mse_loss / valid_dims_count` instead of `torch.mean(err)` |
+| Compute `valid_dims_count` from `valid_mask_f` | `meanflower.py` | `valid_mask_f.sum(dim=1..N)` gives per-sample valid element count |
+| Pass `valid_dims_count` to both FM and MF loss calls | `meanflower.py` | Both branches had the same dilution bug |
+
+**Expected effects**: `fm_log_loss` and `mf_log_loss` will be higher initially (correct scale). `fm_mse`/`mf_mse` unchanged (already use `torch.sum`). Logvar (`lv_fm`, `lv_mf`) should adjust to the corrected scale. Val_loss should improve more smoothly.
+
+**Files changed**: `flower_vla/agents/meanflower.py`
+
 ## [2026-03-13] Integrate Decoupled MeanFlow (DMF) with log-variance loss weighting
 
 **Motivation**: Standard iMF uses a single DiT with shared t/h conditioning and adaptive loss normalization `loss/(loss+eps)^p`. DMF (Kyungmin Lee, 2025) decouples the DiT into encoder (t-conditioned) and decoder (r-conditioned) blocks, enabling cleaner single-step inference at `r=0`. It also replaces the adaptive weighting with a learned log-variance head, which provides per-sample loss scaling without the hand-tuned `eps`/`p` hyperparameters that were a recurring source of instability (see entries from 2026-03-01 and 2026-03-10).

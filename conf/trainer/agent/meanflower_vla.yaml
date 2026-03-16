@@ -50,8 +50,8 @@ agent:
   P_mean: -0.4
   P_std: 1.0
   ratio: 0.75
-  # DMF separate distribution params for t and r
-  P_mean_t: -0.2
+  # DMF separate distribution params for t and r (paper defaults for 1-step generation)
+  P_mean_t: 0.4
   P_std_t: 1.0
-  P_mean_r: 0.2
+  P_mean_r: -1.2
   P_std_r: 1.0

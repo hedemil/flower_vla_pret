@@ -43,16 +43,15 @@ def logvar_timestep_embedding(t, dim=128, max_period=10000):
 
 def log_lv_loss(x, y, lv, valid_dims_count=None, eps=0.01):
     """
-    Log-variance weighted loss from DMF (Decoupled MeanFlow).
+    Log-variance weighted Gaussian NLL loss from DMF.
+    Matches official repo: https://github.com/kyungmnlee/dmf/blob/main/loss.py
 
     Args:
         x: prediction [B, T, D]
         y: target [B, T, D]
-        lv: log-variance scalar [B, 1, 1] (predicted by model)
+        lv: log-variance φ [B, 1, 1] (predicted by model)
         valid_dims_count: [B] number of valid (non-padded) elements per sample.
-            If provided, mean_loss = sum / valid_dims_count instead of torch.mean,
-            avoiding dilution from zero-padded dimensions.
-        eps: numerical stability constant
+        eps: small constant for numerical stability.
 
     Returns:
         mse_loss: per-sample sum of squared errors [B]
@@ -64,7 +63,10 @@ def log_lv_loss(x, y, lv, valid_dims_count=None, eps=0.01):
         mean_loss = mse_loss / valid_dims_count.clamp(min=1)
     else:
         mean_loss = torch.mean(err, dim=list(range(1, len(x.shape))))
-    log_loss = torch.log((1 / lv.exp()) * mean_loss + eps) + lv
+    # Gaussian NLL: log(exp(-φ) * mean_loss + eps) + φ
+    log_loss = torch.log(torch.exp(-lv) * mean_loss + eps) + lv
+    # Squeeze to [B] in case lv broadcasts extra dims
+    log_loss = log_loss.view(x.shape[0])
     return mse_loss, log_loss
 
 
@@ -124,10 +126,10 @@ class MeanFlowerVLA(nn.Module):
         P_mean: float = -0.4,
         P_std: float = 1.0,
         ratio: float = 0.75,
-        # DMF separate distribution parameters
-        P_mean_t: float = -0.2,
+        # DMF separate distribution parameters (paper defaults for 1-step generation)
+        P_mean_t: float = 0.4,
         P_std_t: float = 1.0,
-        P_mean_r: float = 0.2,
+        P_mean_r: float = -1.2,
         P_std_r: float = 1.0,
     ):
         """
@@ -744,19 +746,13 @@ class MeanFlowerVLA(nn.Module):
             u_tgt_valid = u_tgt * valid_mask_f
             mf_mse, mf_log = log_lv_loss(u_pred_valid, u_tgt_valid, lv_mf, valid_dims_count=valid_dims_count)
 
-        # ========== Combine losses ==========
-        loss = 0.5 * (fm_log.mean() + mf_log.mean())
+        # ========== Combine losses (per-sample [B], matching DMF reference) ==========
+        loss = 0.5 * (fm_log + mf_log)
 
-        # Check for NaN/Inf
+        # Check for NaN/Inf (per-sample)
         if torch.isnan(loss).any() or torch.isinf(loss).any():
             logger.warning("NaN/Inf detected in loss! Clipping to prevent crash.")
             loss = torch.nan_to_num(loss, nan=1e6, posinf=1e6, neginf=1e6)
-
-        if loss.grad_fn is None and loss.requires_grad:
-            logger.warning("Loss requires_grad=True but has no grad_fn!")
-        elif not loss.requires_grad:
-            logger.error("Loss does not require gradients! Setting requires_grad=True")
-            loss.requires_grad_(True)
 
         # ========== Monitor metrics ==========
         with torch.no_grad():
@@ -778,7 +774,7 @@ class MeanFlowerVLA(nn.Module):
             ).mean() if valid_mask.any() else torch.tensor(0.0)
 
         losses_dict = {
-            "loss": loss.item(),
+            "loss": loss.mean().item(),
             "fm_mse": fm_mse_mean.item(),
             "mf_mse": mf_mse_mean.item(),
             "fm_log_loss": fm_log.mean().item(),
@@ -789,7 +785,7 @@ class MeanFlowerVLA(nn.Module):
             "cos_u_v": cos_u_v.item(),
             # Aliases expected by flower_trainer logging
             "raw_mse": (fm_mse_mean + mf_mse_mean).item(),
-            "v_loss": loss.item(),
+            "v_loss": loss.mean().item(),
             "cos_u_utgt": cos_u_utgt.item(),
         }
 
@@ -922,7 +918,7 @@ class MeanFlowerVLA(nn.Module):
 
         # Store debugging losses if needed.
         self.losses_dict = losses_dict
-        return action_loss
+        return action_loss.mean()  # batch reduction here, not inside meanflow_loss
 
     def validation_step(self, batch: Dict[str, Dict]) -> Dict[str, torch.Tensor]:
         """
