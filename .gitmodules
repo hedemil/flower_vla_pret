@@ -1,3 +1,6 @@
 [submodule "SimplerEnv"]
 	path = SimplerEnv
 	url = git@github.com:Toradus/SimplerEnv.git
+[submodule "LIBERO"]
+	path = LIBERO
+	url = https://github.com/Lifelong-Robot-Learning/LIBERO.git

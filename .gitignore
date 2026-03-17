@@ -90,7 +90,6 @@ target/
 .idea/
 
 finetune_data/
-LIBERO/
 
 # vscode
 .vscode/
