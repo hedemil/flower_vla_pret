@@ -20,6 +20,17 @@ import torch
 import wandb
 
 from libero.libero import benchmark, get_libero_path
+
+# Patch LIBERO to use weights_only=False (init_states contain pickled numpy arrays)
+_orig_get_init_states = benchmark.Benchmark.get_task_init_states
+def _patched_get_init_states(self, i):
+    init_states_path = os.path.join(
+        get_libero_path("init_states"),
+        self.tasks[i].problem_folder,
+        self.tasks[i].init_states_file,
+    )
+    return torch.load(init_states_path, weights_only=False)
+benchmark.Benchmark.get_task_init_states = _patched_get_init_states
 from libero.libero.envs import OffScreenRenderEnv
 
 from flower_vla.eval.libero.inference_wrapper import LiberoInference
