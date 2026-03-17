@@ -525,29 +525,22 @@ class MeanFlowerVLA(nn.Module):
         z = (1 - texp) * actions + texp * e
         v = e - actions  # target velocity
 
-        # Cast to float32 for JVP — dual tensors must have matching dtype
-        # throughout. RmsNorm's JVP promotes tangents to float32, so if primals
-        # are bf16 we get mixed-dtype duals that crash F.linear.
-        z = z.float()
-        v = v.float()
-        texp = texp.float()
-        rexp = rexp.float()
-
-        # Define network function for JVP
+        # Define network function for JVP.
+        # t and h are NOT detached — the full du/dt includes ∂u/∂t (through
+        # t_embedder/adaLN) and ∂u/∂h (through MeanFlowDecoder's h_embedder).
         def u_func(z_input, t_input, r_input):
             h_input = t_input - r_input
-            t_flat = t_input.detach().view(-1)   # zero tangent through t_embedder/adaLN
-            h_flat = h_input.detach().view(-1)   # zero tangent through h_embedder/decoder
+            t_flat = t_input.view(-1)
+            h_flat = h_input.view(-1)
             return self.dit_forward_meanflow(z_input, t_flat, h_flat, cond)
 
-        # Tangent vectors for JVP (float32 to match)
+        # Tangent vectors: dz/dt = v, dt/dt = 1, dr/dt = 0
         dtdt = torch.ones_like(texp)
         drdt = torch.zeros_like(rexp)
 
-        # Compute u and du/dt using JVP
+        # Compute u and du/dt using JVP.
         # Monkey-patch nn.Linear and RmsNorm to cast weights to input dtype
-        # during JVP, because torch.func.jvp dual tensors' .to(dtype) only
-        # casts the primal, not the tangent — so we cast weights instead.
+        # so dual tensors with promoted tangents don't cause mixed-dtype crashes.
         _orig_linear_forward = nn.Linear.forward
         _orig_rmsnorm_forward = RmsNorm.forward
 
@@ -948,7 +941,7 @@ class MeanFlowerVLA(nn.Module):
             cond_dict: Conditioning dictionary
         """
         B, t_seq, d = z.shape
-        working_dtype = z.dtype  # float32 during JVP, bf16 during inference
+        working_dtype = z.dtype
         # Extract and process conditioning inputs — cast to working_dtype
         cond = self.cond_linear(self.cond_norm(cond_dict['features'].to(working_dtype)))
         freq_embeds = cond_dict['frequency_embeds'].squeeze(1).to(working_dtype)
