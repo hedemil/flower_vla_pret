@@ -442,7 +442,7 @@ class TimestepEmbedder(nn.Module):
     @staticmethod
     def timestep_embedding(t, dim, max_period=10000):
         half = dim // 2
-        freqs = 1000 * torch.exp(
+        freqs = torch.exp(
             -math.log(max_period) * torch.arange(start=0, end=half) / half
         ).to(device=t.device, dtype=t.dtype)
         args = t[:, None] * freqs[None]

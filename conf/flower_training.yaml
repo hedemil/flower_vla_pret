@@ -1,8 +1,8 @@
 defaults:
   - datamodule: oxe_data # uha_data
-  - trainer: meanflower_trainer # meanflower_trainer # flower_trainer # baseline_trainer mode_trainer
+  - trainer: flower_trainer # meanflower_trainer # flower_trainer # baseline_trainer mode_trainer
 
-DATA_NAME: libero_all # simulation_all # libero_all # flowereef # cross_x_no_kit # cross_x # simpler_env #real_kitchen_droid_co_training
+DATA_NAME: flowereef # simulation_all # libero_all # flowereef # cross_x_no_kit # cross_x # simpler_env #real_kitchen_droid_co_training
 
 wandb:
   name: uha_${now:%H-%M-%S}_flower # uha
@@ -45,7 +45,7 @@ static_graph: False
 
 act_dim: 8
 max_proprio_dim: 16
-act_seq_len: 16 
+act_seq_len: 20
 max_train_steps: 800000 # 100000 # 31000 # 23000 # 50000
 max_eval_steps: 100 #0 #00 #250 # 50
 eval_every_n_steps: 10000 #00 #000 # 2000

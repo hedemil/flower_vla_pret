@@ -155,7 +155,7 @@ class FlowerAttention(nn.Module):
         self.proj = nn.Linear(dim, dim, bias=False)
         self.attn_dropout = nn.Dropout(attn_pdrop)
         self.resid_dropout = nn.Dropout(resid_pdrop)
-        self.q_norm = RmsNorm(self.head_dim, eps=1e-6) # For Mean Flow we might have to increase. 
+        self.q_norm = RmsNorm(self.head_dim, eps=1e-6)
         self.k_norm = RmsNorm(self.head_dim, eps=1e-6)
         self.use_rope = use_rope
         if use_rope:
@@ -582,3 +582,4 @@ class ZeroEncoder(nn.Module):
 
     def forward(self, x):
         return torch.zeros((x.shape[0], self.dit_dim), device=self.device)
+    

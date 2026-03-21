@@ -15,7 +15,7 @@ agent:
   img_modalities: ${img_modalities}
   lang_modalities: ${lang_modalities}
   target_modality: ${target_modality}
-  vlm_path: microsoft/Florence-2-base # microsoft/Florence-2-large
+  vlm_path: microsoft/Florence-2-large # microsoft/Florence-2-large
   freeze_florence: False
   freeze_vision_tower: False
   freeze_embeddings_only: True
@@ -34,8 +34,8 @@ agent:
   # flow configuration
   action_type_adaln: True
   dit_dim: 1024
-  n_heads: 8 
-  n_layers: 12
+  n_heads: 16 
+  n_layers: 18
   attn_pdrop: 0.0
   resid_pdrop: 0.0
   mlp_pdrop: 0.0
@@ -47,6 +47,8 @@ agent:
   rope_theta: 1000.0
   # MeanFlower specific
   noise_dist: 'logit_normal'
-  P_mean: -0.4
-  P_std: 1.0
-  ratio: 0.75
+  P_mean: -2.0
+  P_std: 2.0
+  ratio: 0.25
+  norm_eps: 1e-2
+  norm_p: 1.0

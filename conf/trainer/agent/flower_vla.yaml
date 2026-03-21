@@ -15,7 +15,7 @@ agent:
   img_modalities: ${img_modalities}
   lang_modalities: ${lang_modalities}
   target_modality: ${target_modality}
-  vlm_path: microsoft/Florence-2-base
+  vlm_path: microsoft/Florence-2-large # microsoft/Florence-2-large
   freeze_florence: False
   freeze_vision_tower: False
   freeze_embeddings_only: True
@@ -34,8 +34,8 @@ agent:
   # flow configuration
   action_type_adaln: True
   dit_dim: 1024
-  n_heads: 8
-  n_layers: 12
+  n_heads: 16
+  n_layers: 18
   attn_pdrop: 0.3
   resid_pdrop: 0.1
   mlp_pdrop: 0.1

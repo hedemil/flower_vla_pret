@@ -48,7 +48,7 @@ class MeanFlowerVLA(nn.Module):
         vlm_path: str = "microsoft/Florence-2-large",
         freeze_florence: bool = False,
         freeze_vision_tower: bool = False,
-        freeze_embeddings_only: bool = False,  # New parameter
+        freeze_embeddings_only: bool = False,
         vlm_prompt_style: str = 'default',
         token_dropout: float = 0.2,
         cfg_dropout: float = 0.1,
@@ -82,11 +82,13 @@ class MeanFlowerVLA(nn.Module):
         use_nope: bool = False,
         query_seq_len: int = 128,
         rope_theta: float = 32.0,
-        # Mean Flow configuration
+        # Mean Flow Configuration
         noise_dist: str = 'logit_normal',
         P_mean: float = -0.4,
         P_std: float = 1.0,
         ratio: float = 0.75,
+        norm_eps: float = 1e-2,
+        norm_p: float = 0.5,
     ):
         """
         Initializes the MeanFlowerVLA agent that combines a pretrained vision–language model
@@ -139,29 +141,37 @@ class MeanFlowerVLA(nn.Module):
         self.use_dopri5 = False
 
         
+        # Setup DiT components (Mean Flow version with MeanFlowDecoder)
         self._setup_dit_components_meanflow(
-            dit_dim, n_heads, n_layers, action_dim, act_window_size, hidden_dim,
-            attn_pdrop, resid_pdrop, mlp_pdrop, use_cross_attn,
-            use_rope, use_nope, query_seq_len, rope_theta,
+            dit_dim=dit_dim,
+            n_heads=n_heads,
+            n_layers=n_layers,
+            action_dim=action_dim,
+            act_window_size=act_window_size,
+            hidden_dim=hidden_dim,
+            attn_pdrop=attn_pdrop,
+            resid_pdrop=resid_pdrop,
+            mlp_pdrop=mlp_pdrop,
+            use_cross_attn=use_cross_attn,
+            use_rope=use_rope,
+            use_nope=use_nope,
+            query_seq_len=query_seq_len,
+            rope_theta=rope_theta,
         )
+
         # Mean Flow specific parameters
         self.noise_dist = noise_dist
         self.ratio = ratio
-        self.register_buffer(
-            "P_mean",
-            torch.tensor(P_mean, dtype=torch.float32)
-        )
-        self.register_buffer(
-            "P_std",
-            torch.tensor(P_std, dtype=torch.float32)
-        )
+        self.register_buffer("P_mean", torch.tensor(P_mean, dtype=torch.float32))
+        self.register_buffer("P_std", torch.tensor(P_std, dtype=torch.float32))
+        self.norm_eps = norm_eps
+        self.norm_p = norm_p
 
         logger.info("VLM and DiT components set up.")
 
         # Initialize rollout state.
         self.rollout_step_counter = 0
         self.pred_action_seq = None
-        self._train_step = 0
 
         # Ensure that all parameters and buffers are on the correct device.
         self.ensure_device_consistency()
@@ -273,6 +283,38 @@ class MeanFlowerVLA(nn.Module):
             self.proprio_encoders = nn.ModuleDict()
         self.adaln = nn.ModuleDict() if self.action_type_adaln else None
 
+        # Set up shared conditioning components
+        self.cond_linear = nn.Linear(hidden_dim, dit_dim, bias=False)
+        self.t_embedder = TimestepEmbedder(dit_dim)
+        self.h_embedder = TimestepEmbedder(dit_dim)
+        self.cond_norm = RmsNorm(hidden_dim)
+        self.frequency_embedder = FreqEmbedder(dit_dim)
+        self.action_space_embedder = ActionSpaceEmbedderParameter(
+            dit_dim,
+            max_actions=len(self.action_space_index.action_spaces)
+        )
+
+        # Set up positional encoding if neither RoPE nor NoPE is used
+        if not use_rope and not use_nope:
+            self.positional_encoding = nn.Parameter(
+                torch.randn(1, act_window_size, dit_dim) * 0.1
+            )
+
+        # Set up DiT blocks
+        self.dit = nn.ModuleList([
+            FlowBlock(
+                dim=dit_dim,
+                heads=n_heads,
+                attn_pdrop=attn_pdrop,
+                resid_pdrop=resid_pdrop,
+                mlp_pdrop=mlp_pdrop,
+                use_cross_attn=use_cross_attn,
+                use_rope=use_rope,
+                query_seq_len=query_seq_len,
+                rope_theta=rope_theta
+            ) for _ in range(n_layers)
+        ])
+
         # Set up action-specific components
         for action_name, action_idx in self.action_space_index.action_spaces.items():
             input_dim = self.action_space_index.get_action_dim(action_idx)
@@ -321,37 +363,6 @@ class MeanFlowerVLA(nn.Module):
                 global_conddim=dit_dim,
                 use_cross_attn=use_cross_attn
             )
-
-        # Set up shared conditioning components
-        self.cond_linear = nn.Linear(hidden_dim, dit_dim, bias=False)
-        self.t_embedder = TimestepEmbedder(dit_dim)
-        self.cond_norm = RmsNorm(hidden_dim)
-        self.frequency_embedder = FreqEmbedder(dit_dim)
-        self.action_space_embedder = ActionSpaceEmbedderParameter(
-            dit_dim,
-            max_actions=len(self.action_space_index.action_spaces)
-        )
-
-        # Set up positional encoding if neither RoPE nor NoPE is used
-        if not use_rope and not use_nope:
-            self.positional_encoding = nn.Parameter(
-                torch.randn(1, act_window_size, dit_dim) * 0.1
-            )
-
-        # Set up DiT blocks
-        self.dit = nn.ModuleList([
-            FlowBlock(
-                dim=dit_dim,
-                heads=n_heads,
-                attn_pdrop=attn_pdrop,
-                resid_pdrop=resid_pdrop,
-                mlp_pdrop=mlp_pdrop,
-                use_cross_attn=use_cross_attn,
-                use_rope=use_rope,
-                query_seq_len=query_seq_len,
-                rope_theta=rope_theta
-            ) for _ in range(n_layers)
-        ])
 
     def _verify_device_consistency(self) -> None:
         """Verifies that all parameters and buffers are on the expected device."""
@@ -405,11 +416,12 @@ class MeanFlowerVLA(nn.Module):
         merged_embeds = torch.cat([task_prompt.to(image_features.device), image_features, text_embeds.to(image_features.device)], dim=1)
 
         # get attention mask from txt
+        attention_mask = torch.ones(merged_embeds.shape[:2], device=merged_embeds.device)
         lang_attention_mask = batch[self.goal_modalities][self.lang_modalities[0]]['attention_mask'].to(device).squeeze(1)
-        # define attention mask for image — use bool dtype throughout for cross-attention compatibility
-        vis_attention_mask = torch.ones(image_features.shape[:2], dtype=torch.bool, device=image_features.device)
+        # define attention mask for image
+        vis_attention_mask = torch.ones(image_features.shape[:2], device=image_features.device)
         prompt_mask = torch.zeros(B, 1, dtype=torch.bool, device=image_features.device)
-        attention_mask = torch.cat([prompt_mask, vis_attention_mask, lang_attention_mask.bool()], dim=1)
+        attention_mask = torch.cat([prompt_mask, vis_attention_mask, lang_attention_mask], dim=1)
 
         features = self.vlm.get_encoder()(
             inputs_embeds=merged_embeds, 
@@ -426,7 +438,7 @@ class MeanFlowerVLA(nn.Module):
             text_start = prompt_length + image_length
             text_end = text_start + text_length  # text features occupy features[:, text_start:text_end, :]
             # Create a dropout mask for the entire batch (per example)
-            drop_mask = (torch.rand(B, device=device) < self.cfg_dropout).to(dtype=default_dtype).view(B, 1, 1)
+            drop_mask = (torch.rand(B, device=device) < self.cfg_dropout).float().view(B, 1, 1)
             # Apply the mask only to the text portion of the features.
             features[:, text_start:text_end, :] = features[:, text_start:text_end, :] * (1 - drop_mask)
 
@@ -446,10 +458,11 @@ class MeanFlowerVLA(nn.Module):
             - Encoded actions (latent representations).
             - A valid dimensions mask.
         """
+        default_dtype = next(self.parameters()).dtype
         action_type = action_type.to(self.device)
         B = z.shape[0]
-        encoded = torch.zeros(B, z.shape[1], self.dit_dim, device=self.device, dtype=z.dtype)
-        valid_dims = torch.zeros_like(z)
+        encoded = torch.zeros(B, z.shape[1], self.dit_dim, device=self.device, dtype=default_dtype)
+        valid_dims = torch.zeros_like(z, dtype=default_dtype)
         for action_name, action_idx in self.action_space_index.action_spaces.items():
             mask = (action_type == action_idx)
             if mask.any():
@@ -465,28 +478,15 @@ class MeanFlowerVLA(nn.Module):
         """
         Decodes latent representations into actions using MeanFlowDecoder.
         The decoder is conditioned on h = t - r.
-
-        Args:
-            z: DiT latent features [B, T, dit_dim]
-            h: Timestep difference (t - r), broadcastable shape.
-            action_type: Action type indices [B] or broadcastable.
-            valid_dims: Valid dimensions mask [B, T, action_dim].
         """
+        default_dtype = next(self.parameters()).dtype
         B = z.shape[0]
         max_action_dim = self.action_dim
-        decoded = torch.zeros(B, z.shape[1], max_action_dim, device=self.device, dtype=z.dtype)
+        decoded = torch.zeros(B, z.shape[1], max_action_dim, device=self.device, dtype=default_dtype)
         for action_name, action_idx in self.action_space_index.action_spaces.items():
             mask = (action_type == action_idx)
             if mask.any():
-                adim = self.action_space_index.get_action_dim(action_idx)
-                # MeanFlowDecoder takes (z, h)
-                if mask.all():
-                    pred = self.action_decoders[action_name](z, h)
-                else:
-                    # Slice h for masked batch elements
-                    h_masked = h[mask] if h.dim() >= 1 and h.shape[0] == B else h
-                    pred = self.action_decoders[action_name](z[mask], h_masked)
-                decoded[mask, :, :adim] = pred[..., :adim] * valid_dims[mask, :, :adim]
+                decoded = self.action_decoders[action_name](z, h)
         return decoded
 
     # === Loss Functions ===
@@ -506,86 +506,60 @@ class MeanFlowerVLA(nn.Module):
         # Sample t and r with constraint t >= r
         t, r = self.sample_tr(b)
 
+        if self.global_rank == 0 and self.trainer.fit_loop.total_batch_idx % 1000 == 0:
+            logger.info(f"Step {self.global_step} | t: mean={t.mean().item():.4f}, std={t.std().item():.4f}, min={t.min().item():.4f}, max={t.max().item():.4f}")
+            logger.info(f"Step {self.global_step} | r: mean={r.mean().item():.4f}, std={r.std().item():.4f}, min={r.min().item():.4f}, max={r.max().item():.4f}")
+
         # Interpolate: z_t = (1 - t) * x + t * e
         texp = t.view([b] + [1] * (actions.dim() - 1)).to(dtype=default_dtype)
         rexp = r.view([b] + [1] * (actions.dim() - 1)).to(dtype=default_dtype)
 
-        # Sample noise per action space
+        # Sample noise only over valid action dimensions (padding stays zero)
         e = torch.zeros_like(actions)
         for action_name, action_idx in self.action_space_index.action_spaces.items():
             mask = (action_type == action_idx)
             if mask.any():
                 adim = self.action_space_index.get_action_dim(action_idx)
-                noise_slice = torch.randn(
-                    (mask.sum(), actions.size(1), adim),
-                    dtype=actions.dtype, device=device
-                )
+                noise_slice = torch.randn((mask.sum(), actions.size(1), adim), dtype=default_dtype, device=device)
                 e[mask, :, :adim] = noise_slice
 
         z = (1 - texp) * actions + texp * e
         v = e - actions  # target velocity
 
-        # Cast to float32 for JVP — dual tensors must have matching dtype
-        # throughout. RmsNorm's JVP promotes tangents to float32, so if primals
-        # are bf16 we get mixed-dtype duals that crash F.linear.
-        z = z.float()
-        v = v.float()
-        texp = texp.float()
-        rexp = rexp.float()
-
-        # Define network function for JVP
+        # Define network function for JVP.
+        # t and h are NOT detached — the full du/dt includes ∂u/∂t (through
+        # t_embedder/adaLN) and ∂u/∂h (through MeanFlowDecoder's h_embedder).
         def u_func(z_input, t_input, r_input):
             h_input = t_input - r_input
-            t_flat = t_input.detach().view(-1)   # zero tangent through t_embedder/adaLN
-            h_flat = h_input.detach().view(-1)   # zero tangent through h_embedder/decoder
+            t_flat = t_input.view(-1)
+            h_flat = h_input.view(-1)
             return self.dit_forward_meanflow(z_input, t_flat, h_flat, cond)
 
-        # Tangent vectors for JVP (float32 to match)
+        # Tangent vectors: dz/dt = v, dt/dt = 1, dr/dt = 0
         dtdt = torch.ones_like(texp)
         drdt = torch.zeros_like(rexp)
 
-        # Compute u and du/dt using JVP
-        # Monkey-patch nn.Linear and RmsNorm to cast weights to input dtype
-        # during JVP, because torch.func.jvp dual tensors' .to(dtype) only
-        # casts the primal, not the tangent — so we cast weights instead.
-        _orig_linear_forward = nn.Linear.forward
-        _orig_rmsnorm_forward = RmsNorm.forward
-
-        def _jvp_safe_linear_forward(self, input):
-            return F.linear(
-                input,
-                self.weight.to(input.dtype),
-                self.bias.to(input.dtype) if self.bias is not None else None,
-            )
-
-        def _jvp_safe_rmsnorm_forward(self, x):
-            return F.rms_norm(x, self.normalized_shape, self.weight.to(x.dtype), self.eps)
-
         with torch.amp.autocast("cuda", enabled=False):
-            nn.Linear.forward = _jvp_safe_linear_forward
-            RmsNorm.forward = _jvp_safe_rmsnorm_forward
-            try:
-                u_pred, dudt = torch.func.jvp(
-                    u_func,
-                    (z, texp, rexp),
-                    (v, dtdt, drdt)
-                )
-            finally:
-                nn.Linear.forward = _orig_linear_forward
-                RmsNorm.forward = _orig_rmsnorm_forward
+           
+            u_pred, dudt = torch.func.jvp(
+                u_func,
+                (z, texp, rexp),
+                (v, dtdt, drdt)
+            )
 
             # u_tgt = v - h * du/dt
             h = (texp - rexp).clamp(min=0.0, max=1.0)
             u_tgt = (v - h * dudt).detach()
 
-            # Build valid mask
+
+            # Build valid mask over action dimensions
             valid_mask = torch.zeros_like(actions, dtype=torch.bool)
             for action_name, action_idx in self.action_space_index.action_spaces.items():
-                mask = (action_type == action_idx)
-                if mask.any():
+                amask = (action_type == action_idx)
+                if amask.any():
                     adim = self.action_space_index.get_action_dim(action_idx)
-                    mask_expanded = mask.view(-1, 1, 1).expand(-1, actions.size(1), adim).to(device)
-                    valid_mask[mask, :, :adim] = mask_expanded[mask]
+                    mask_expanded = amask.view(-1, 1, 1).expand(-1, actions.size(1), adim).to(device)
+                    valid_mask[amask, :, :adim] = mask_expanded[amask]
 
             # Compute loss only over valid dimensions
             diff = u_pred - u_tgt
@@ -598,14 +572,12 @@ class MeanFlowerVLA(nn.Module):
             # self-referential target u_tgt = v - h*du/dt creates a positive
             # feedback loop where large du/dt → large loss → large gradients
             # → even larger du/dt, causing divergence.
-            norm_eps = 0.001
-            norm_p = 0.75
-            adp_wt = (loss_per_sample.detach() + norm_eps) ** norm_p
+            adp_wt = (loss_per_sample.detach() + self.norm_eps) ** self.norm_p
             loss_per_sample = loss_per_sample / adp_wt
 
             loss = loss_per_sample.mean()
 
-        # Monitor metrics
+        # Monitor metrics (only over valid dimensions)
         with torch.no_grad():
             valid_u = u_pred[valid_mask]
             valid_v = v[valid_mask]
@@ -615,7 +587,7 @@ class MeanFlowerVLA(nn.Module):
             raw_mse = raw_mse_per_sample.mean()
             # Track du/dt magnitude — if this vanishes, the model degenerates
             # to standard flow and single-step sampling will fail.
-            dudt_norm = dudt[valid_mask].norm(dim=0).mean()
+            dudt_norm = dudt.norm(dim=0).mean()
             # Prediction/target norms
             u_pred_norm = valid_u.norm(dim=0).mean()
             u_tgt_norm = valid_utgt.norm(dim=0).mean()
@@ -627,16 +599,6 @@ class MeanFlowerVLA(nn.Module):
             cos_u_v = F.cosine_similarity(
                 valid_u.unsqueeze(0), valid_v.unsqueeze(0), dim=-1
             ).mean()
-            # Per-timestep-bucket v_loss (where does the model struggle?)
-            t_flat = t.view(-1)
-            low_mask = t_flat < 0.3
-            mid_mask = (t_flat >= 0.3) & (t_flat < 0.7)
-            high_mask = t_flat >= 0.7
-            u_v_diff = (u_pred - v) ** 2 * valid_mask.to(dtype=default_dtype)
-            u_v_per_sample = u_v_diff.sum(dim=(1, 2))
-            vloss_t_low = u_v_per_sample[low_mask].mean() if low_mask.any() else torch.tensor(0.0)
-            vloss_t_mid = u_v_per_sample[mid_mask].mean() if mid_mask.any() else torch.tensor(0.0)
-            vloss_t_high = u_v_per_sample[high_mask].mean() if high_mask.any() else torch.tensor(0.0)
 
         # Check for NaN/Inf in outputs
         if torch.isnan(u_pred).any() or torch.isinf(u_pred).any():
@@ -666,15 +628,8 @@ class MeanFlowerVLA(nn.Module):
             "u_tgt_norm": u_tgt_norm.item(),
             "cos_u_utgt": cos_u_utgt.item(),
             "cos_u_v": cos_u_v.item(),
-            "vloss_t_low": vloss_t_low.item(),
-            "vloss_t_mid": vloss_t_mid.item(),
-            "vloss_t_high": vloss_t_high.item(),
             "h_mean": h.mean().item(),
         }
-
-        if hasattr(self, 'accelerator') and self.accelerator is not None and wandb.run is not None:
-            if self.accelerator.is_main_process:
-                wandb.log(losses_dict)
 
         return loss, losses_dict
 
@@ -691,7 +646,7 @@ class MeanFlowerVLA(nn.Module):
     def _logit_normal_dist(self, bz: int) -> torch.Tensor:
         """Sample from logit-normal distribution. Math in float32 for stability."""
         rnd_normal = torch.randn(
-            bz, 1, 1, 1,
+            bz,
             device=self.P_mean.device,
             dtype=torch.float32
         )
@@ -703,7 +658,7 @@ class MeanFlowerVLA(nn.Module):
     def _uniform_dist(self, bz: int) -> torch.Tensor:
         """Sample from uniform distribution."""
         return torch.rand(
-            bz, 1, 1, 1,
+            bz,
             device=self.P_mean.device,
             dtype=next(self.parameters()).dtype
         )
@@ -713,11 +668,10 @@ class MeanFlowerVLA(nn.Module):
         Sample timesteps t and r with constraint t >= r.
         `ratio` fraction of samples keep r != t (integral/mean-flow samples).
         The remaining (1 - ratio) fraction get r = t (instantaneous velocity).
-        Matches py-meanflow reference: ratio=0.75 → 75% integral, 25% velocity.
 
         Returns:
-            t: Sampled timesteps [B, 1, 1, 1]
-            r: Sampled timesteps [B, 1, 1, 1]
+            t: Sampled timesteps [B]
+            r: Sampled timesteps [B]
         """
         dtype = next(self.parameters()).dtype
 
@@ -728,7 +682,7 @@ class MeanFlowerVLA(nn.Module):
         t, r = torch.maximum(t, r), torch.minimum(t, r)
 
         # With probability (1 - ratio), collapse to velocity (r = t)
-        prob = torch.rand(b, 1, 1, 1, device=self.device)
+        prob = torch.rand(b, device=self.device)
         velocity_mask = prob < (1 - self.ratio)
         r = torch.where(velocity_mask, t, r)
 
@@ -737,38 +691,23 @@ class MeanFlowerVLA(nn.Module):
     # === Sampling Methods ===
     def sample_actions(self, z: torch.Tensor, cond: Dict[str, torch.Tensor], inference: bool = False) -> torch.Tensor:
         """
-        Samples actions from the DiT model.
-        Chooses between an adaptive ODE solver and fixed-step Euler integration.
+        Mean Flow single-step sampling: z_0 = z_1 - u(z_1, t=1, r=0)
+        (h = t - r = 1)
         """
-        steps = self.num_sampling_steps if inference else 5
         b = z.size(0)
+        device = z.device
+        dtype = next(self.parameters()).dtype
+        z = z.to(dtype=dtype)
         action_type = cond['action_type']
         for action_name, action_idx in self.action_space_index.action_spaces.items():
             mask = (action_type == action_idx)
             if mask.any():
                 adim = self.action_space_index.get_action_dim(action_idx)
                 z[mask, :, adim:] = 0.0
-        
-        return self._sample_with_fixed_steps(z, cond, inference)
-
-    def _sample_with_fixed_steps(self, z: torch.Tensor, cond: Dict[str, torch.Tensor], inference: bool = False) -> torch.Tensor:
-        """
-        Samples actions using fixed-step Euler integration (rectified flow)
-        or single-step sampling (mean flow).
-        """
-        b = z.size(0)
-        device = z.device
-        action_type = cond['action_type']
-        
-        # MeanFlow: single-step sampling
-        # z_0 = z_1 - u(z_1, t=1, h=1)
-        dtype = next(self.parameters()).dtype
-        z = z.to(dtype=dtype)
         t_tensor = torch.ones(b, device=device, dtype=dtype)
-        h_tensor = torch.ones(b, device=device, dtype=dtype)
+        h_tensor = torch.ones(b, device=device, dtype=dtype)  # h = t - r = 1 - 0 = 1
         u = self.dit_forward_meanflow(z, t_tensor, h_tensor, cond)
         z = z - u
-
         return z.clamp(-1, 1)
 
     # === Forward Pass and Rollout Methods ===
@@ -865,78 +804,6 @@ class MeanFlowerVLA(nn.Module):
                 "dataset_index": batch['task'].get('dataset_index', torch.zeros(B, device=self.device)).detach()
             }
 
-    def meanflow_eval_loss_step(self, batch: dict) -> dict:
-        """Wrapper for meanflow eval loss: encodes observations then computes v_loss."""
-        self.eval()
-        with torch.no_grad():
-            target_actions = batch[self.target_modality]
-            if len(target_actions.shape) == 4:
-                target_actions = target_actions.squeeze(1)
-            obs_features = self.encode_observations(batch)
-            result = self.meanflow_eval_loss(obs_features, target_actions)
-            B = target_actions.shape[0]
-            result['dataset_index'] = batch['task'].get(
-                'dataset_index', torch.zeros(B, device=self.device)
-            ).detach()
-            return result
-
-    @torch.no_grad()
-    def meanflow_eval_loss(self, cond: dict, actions: torch.Tensor) -> dict:
-        """
-        Compute ||u(z_t, t, h) - v||² during eval (no JVP needed).
-        Matches the setup of meanflow_loss lines 498-526 but only does a single forward pass.
-        """
-        default_dtype = next(self.parameters()).dtype
-        action_type = cond['action_type']
-        if len(actions.shape) == 4:
-            actions = actions.squeeze(1)
-        b = actions.size(0)
-        device = actions.device
-        actions = actions.to(dtype=default_dtype)
-
-        # Sample t and r
-        t, r = self.sample_tr(b)
-
-        texp = t.view([b] + [1] * (actions.dim() - 1)).to(dtype=default_dtype)
-
-        # Sample noise per action space
-        e = torch.zeros_like(actions)
-        for action_name, action_idx in self.action_space_index.action_spaces.items():
-            mask = (action_type == action_idx)
-            if mask.any():
-                adim = self.action_space_index.get_action_dim(action_idx)
-                noise_slice = torch.randn(
-                    (mask.sum(), actions.size(1), adim),
-                    dtype=actions.dtype, device=device
-                )
-                e[mask, :, :adim] = noise_slice
-
-        z = (1 - texp) * actions + texp * e
-        v = e - actions  # target velocity
-
-        # Compute h = t - r
-        h_val = t - r
-        t_flat = t.view(-1)
-        h_flat = h_val.view(-1)
-
-        # Single forward pass
-        with torch.autocast('cuda', dtype=torch.bfloat16):
-            u_pred = self.dit_forward_meanflow(z, t_flat, h_flat, cond)
-
-        # Per-sample ||u - v||² over valid action dims
-        per_sample_loss = torch.zeros(b, device=device)
-        for action_name, action_idx in self.action_space_index.action_spaces.items():
-            mask = (action_type == action_idx)
-            if mask.any():
-                adim = self.action_space_index.get_action_dim(action_idx)
-                per_sample_loss[mask] = F.mse_loss(
-                    u_pred[mask, :, :adim].float(),
-                    v[mask, :, :adim].float(),
-                    reduction='none'
-                ).mean(dim=(1, 2))
-
-        return {"loss": per_sample_loss.detach()}
-
     def dit_forward_meanflow(self, z: torch.Tensor, t: torch.Tensor, h: torch.Tensor, cond_dict: dict) -> torch.Tensor:
         """
         Forward pass through the DiT blocks using MeanFlowDecoder.
@@ -947,63 +814,75 @@ class MeanFlowerVLA(nn.Module):
             h: Timestep difference (t - r) [B]
             cond_dict: Conditioning dictionary
         """
+        default_dtype = next(self.parameters()).dtype
         B, t_seq, d = z.shape
-        working_dtype = z.dtype  # float32 during JVP, bf16 during inference
-        # Extract and process conditioning inputs — cast to working_dtype
-        cond = self.cond_linear(self.cond_norm(cond_dict['features'].to(working_dtype)))
-        freq_embeds = cond_dict['frequency_embeds'].squeeze(1).to(working_dtype)
+        
+        # Get conditioning information
+        cond = cond_dict['features'].to(default_dtype)
+        frequency_embeds = cond_dict['frequency_embeds'].squeeze(1).to(default_dtype)
         action_type = cond_dict['action_type'].to(self.device)
-        proprio = cond_dict.get('proprio', torch.zeros_like(freq_embeds)).to(working_dtype) if self.use_proprio else torch.zeros_like(freq_embeds)
-        proprio_embeds = self.encode_proprio(proprio, action_type, freq_embeds.shape).to(working_dtype)
-
-        # Encode actions and positional information
+        
+        # Handle proprioception
+        if self.use_proprio and cond_dict['proprio'] is not None:
+            proprio = cond_dict['proprio'].to(default_dtype)
+            proprio_embeds = self.encode_proprio(proprio, action_type, frequency_embeds.shape)
+        else:
+            proprio_embeds = torch.zeros_like(frequency_embeds)
+        
+        # Encode actions
         z, valid_dims = self.encode_actions(z, action_type)
-        if not (self.use_rope or self.use_nope):
-            z += self.positional_encoding
+        
+        # Add positional encoding if not using ROPE/NOPE
+        if not self.use_rope and not self.use_nope:
+            z = z + self.positional_encoding
+        
+        # Process embeddings (h-conditioning feeds all DiT blocks, not just the decoder)
+        t_emb = stateless_norm(self.t_embedder(t)) + \
+                stateless_norm(self.h_embedder(h)) + \
+                stateless_norm(frequency_embeds).squeeze(1) + \
+                stateless_norm(proprio_embeds).squeeze(1)
 
-        # Apply CFG dropout on freq_embeds and proprio_embeds only
-        if self.training and self.cfg_dropout > 0:
-            drop_mask = (torch.rand(freq_embeds.size(0), device=freq_embeds.device) < self.cfg_dropout).to(dtype=working_dtype).unsqueeze(1)
-            freq_embeds = freq_embeds * (1 - drop_mask)
-            proprio_embeds = proprio_embeds * (1 - drop_mask)
+        cond = self.cond_linear(self.cond_norm(cond))
 
-        # Compute temporal embedding
-        t_emb = sum(map(stateless_norm, [self.t_embedder(t), freq_embeds, proprio_embeds]))
-
-        # Compute global conditioning
+        # Set up conditioning
         if self.use_adaln_cond:
-            global_cond = cond[:, 0, :] if self.use_readout_token else cond.mean(dim=1)
-            global_cond += t_emb
+            vlm_token = cond[:, 0, :] if self.use_readout_token else cond.mean(dim=1)
+            global_cond = vlm_token + t_emb
         else:
             global_cond = t_emb
 
+        # Setup context
+        cx = z
         context = cond if self.use_cross_attn else None
 
-        # Compute AdaLN modulation
-        global_adaln = self.adaln(global_cond) if not self.action_type_adaln else self.action_specific_adaln(global_cond, action_type)
+        # Get adaln signals
+        if not self.action_type_adaln:
+            global_adaln = self.adaln(global_cond)
+        else:
+            global_adaln = self.action_specific_adaln(global_cond, action_type)
 
         for layer in self.dit:
-            z = layer(z, global_cond, context=context, custom_attn_mask=None,
-                    custom_cross_attn_mask=cond_dict['attention_mask'], is_causal=True, global_adaln=global_adaln)
+            cx = layer(cx, global_cond, context=context, is_causal=True, global_adaln=global_adaln)
 
         # Decode actions with h-conditioned MeanFlowDecoder
-        return self.decode_actions_meanflow(z, h, action_type, valid_dims)
-
+        return self.decode_actions_meanflow(cx, h, action_type, valid_dims)
+    
     def encode_proprio(self, proprio: torch.Tensor, action_type: torch.Tensor, output_shape) -> torch.Tensor:
         """
         Encodes proprioceptive data based on action type.
         Returns a tensor with shape [batch, dit_dim].
         """
         batch_size, _ = output_shape
-
+        dtype = next(self.parameters()).dtype
+        
         if not self.use_proprio:
-            return torch.zeros(batch_size, self.dit_dim, device=self.device, dtype=proprio.dtype)
-
-        encoded = torch.zeros(batch_size, self.dit_dim, device=self.device, dtype=proprio.dtype)
+            return torch.zeros(batch_size, self.dit_dim, device=self.device)
+        
+        encoded = torch.zeros(batch_size, self.dit_dim, device=self.device, dtype=dtype)
         for action_name, action_idx in self.action_space_index.action_spaces.items():
             mask = (action_type == action_idx)
             if mask.any():
-                encoded[mask] = self.proprio_encoders[action_name](proprio[mask]).squeeze(1)
+                encoded[mask] = self.proprio_encoders[action_name](proprio[mask]).squeeze(1).to(dtype)
         
         return encoded
 
@@ -1012,10 +891,11 @@ class MeanFlowerVLA(nn.Module):
         Computes action-specific AdaLN modulation signals.
         Returns a list of modulation tensors.
         """
+        dtype = next(self.parameters()).dtype
         batch_size = global_cond.shape[0]
         num_chunks = 9 if self.use_cross_attn else 6
-
-        mod_signals = [torch.zeros(batch_size, self.dit_dim, device=self.device, dtype=global_cond.dtype) for _ in range(num_chunks)]
+        
+        mod_signals = [torch.zeros(batch_size, self.dit_dim, device=self.device, dtype=dtype) for _ in range(num_chunks)]
         
         for action_idx in range(len(self.action_space_index.action_spaces)):
             mask = (action_type == action_idx)
@@ -1034,35 +914,18 @@ class MeanFlowerVLA(nn.Module):
         Returns a list of parameter groups.
         """
         no_decay = ['bias', 'LayerNorm', 'layernorm', 'ln', 'norm']
-        decoder_params_set = set()
-        for decoder in self.action_decoders.values():
-            decoder_params_set.update(p for p in decoder.parameters())
-
-        decoder_weight_decay = optimizer_config.get("decoder_weight_decay", optimizer_config["transformer_weight_decay"])
-
         decay_group = []
         no_decay_group = []
-        decoder_decay_group = []
-        decoder_no_decay_group = []
         vlm_params = set(p for p in self.vlm.parameters())
         for name, param in self.named_parameters():
             if param.requires_grad and param.is_leaf and param not in vlm_params:
-                is_no_decay = any(nd in name.lower() for nd in no_decay)
-                if param in decoder_params_set:
-                    if is_no_decay:
-                        decoder_no_decay_group.append(param)
-                    else:
-                        decoder_decay_group.append(param)
+                if any(nd in name.lower() for nd in no_decay):
+                    no_decay_group.append(param)
                 else:
-                    if is_no_decay:
-                        no_decay_group.append(param)
-                    else:
-                        decay_group.append(param)
+                    decay_group.append(param)
         optim_groups = [
             {"params": decay_group, "weight_decay": optimizer_config["transformer_weight_decay"]},
-            {"params": no_decay_group, "weight_decay": 0.0},
-            {"params": decoder_decay_group, "weight_decay": decoder_weight_decay},
-            {"params": decoder_no_decay_group, "weight_decay": 0.0},
+            {"params": no_decay_group, "weight_decay": 0.0}
         ]
         return optim_groups
 
