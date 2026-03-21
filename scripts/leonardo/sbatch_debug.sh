@@ -139,7 +139,7 @@ echo ""
 # --- Launch training (short run for validation) ---
 cd "${CODE_DIR}"
 
-python -m accelerate.commands.launch --num_processes 4 \
+python -m accelerate.commands.launch --num_processes 4 --mixed_precision=bf16 \
     flower_vla/training.py \
     --config-name="${MODEL}_training.yaml" \
     datamodule.datasets.DATA_PATH="${DATA_DIR}" \
