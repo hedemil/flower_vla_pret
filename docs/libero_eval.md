@@ -53,14 +53,14 @@ checkpoints/runs/2026-03-17/03-23-38/
 
 ```bash
 python -m flower_vla.eval.libero.libero_eval \
-    --checkpoint_dir $(pwd)/checkpoints/2026-03-17/03-23-38 \
-    --checkpoint_name checkpoint_30000 \
+    --checkpoint_dir $(pwd)/checkpoints/libero_10_flower \
+    --checkpoint_name libero_10 \
     --benchmark_name libero_10 \
     --n_eval 20 \
     --num_videos 3 \
     --pred_action_horizon 10 \
     --multistep 5 \
-    --num_sampling_steps 1
+    --num_sampling_steps 4
 ```
 
 ### Cross-benchmark evaluation
