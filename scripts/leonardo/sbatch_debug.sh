@@ -146,4 +146,6 @@ python -m accelerate.commands.launch --num_processes 4 --mixed_precision=bf16 \
     log_dir="${OUTPUT_DIR}" \
     wandb.entity=null \
     wandb.mode=offline \
+    batch_size=256 \
+    gradient_accumulation_steps=4 \
     max_train_steps=50
