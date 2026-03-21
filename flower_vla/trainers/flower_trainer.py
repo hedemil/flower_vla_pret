@@ -1,3 +1,4 @@
+import io
 import os
 import gc
 import logging
@@ -525,9 +526,10 @@ class AccelerateTrainer:
                 model_state = {
                     k: v.detach().cpu() for k, v in model.state_dict().items()
                 }
-                tmp_path = default_weights_path + ".tmp"
-                torch.save(model_state, tmp_path)
-                os.replace(tmp_path, default_weights_path)
+                buf = io.BytesIO()
+                torch.save(model_state, buf)
+                with open(default_weights_path, 'wb') as f:
+                    f.write(buf.getvalue())
 
                 # Save EMA weights if available
                 if self.use_ema and self.ema is not None:
@@ -538,9 +540,10 @@ class AccelerateTrainer:
                     ema_state = {
                         k: v.detach().cpu() for k, v in ema_model.state_dict().items()
                     }
-                    tmp_path = ema_weights_path + ".tmp"
-                    torch.save(ema_state, tmp_path)
-                    os.replace(tmp_path, ema_weights_path)
+                    buf = io.BytesIO()
+                    torch.save(ema_state, buf)
+                    with open(ema_weights_path, 'wb') as f:
+                        f.write(buf.getvalue())
             
             # Synchronize again
             self.accelerator.wait_for_everyone()
