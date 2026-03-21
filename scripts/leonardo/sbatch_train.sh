@@ -132,7 +132,6 @@ cd "${CODE_DIR}"
 
 python -m accelerate.commands.launch --num_processes 4 \
     flower_vla/training.py \
-    --config-path=conf \
     --config-name="${MODEL}_training.yaml" \
     datamodule.datasets.DATA_PATH="${DATA_DIR}" \
     log_dir="${OUTPUT_DIR}" \
