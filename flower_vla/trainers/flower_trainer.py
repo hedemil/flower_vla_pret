@@ -354,12 +354,13 @@ class AccelerateTrainer:
                     torch.cuda.empty_cache()
                 if step % 1000 == 0 and self.accelerator.is_main_process:
                     losses_info = self.agent.module.agent.losses_dict
+                    loss = losses_info.get("loss", float("nan"))
                     raw_mse = losses_info.get("raw_mse", float("nan"))
                     v_loss = losses_info.get("v_loss", float("nan"))
                     dudt_norm = losses_info.get("dudt_norm", float("nan"))
                     cos_u_utgt = losses_info.get("cos_u_utgt", float("nan"))
                     cos_u_v = losses_info.get("cos_u_v", float("nan"))
-                    log.info(f"Step {self.global_step}: raw_mse={raw_mse:.6f}, v_loss={v_loss:.6f}, dudt_norm={dudt_norm:.6f}, cos_u_utgt={cos_u_utgt:.4f}, cos_u_v={cos_u_v:.4f}")
+                    log.info(f"Step {self.global_step}: loss={loss:.6f} raw_mse={raw_mse:.6f}, v_loss={v_loss:.6f}, dudt_norm={dudt_norm:.6f}, cos_u_utgt={cos_u_utgt:.4f}, cos_u_v={cos_u_v:.4f}")
 
                 if step % 100 == 0 and wandb.run is not None and self.accelerator.is_main_process:
                     # Get metrics from agent
@@ -398,7 +399,6 @@ class AccelerateTrainer:
         except Exception as e:
             log.error(f"Training interrupted: {str(e)}")
             log.error(f"Full traceback:\n{traceback.format_exc()}")
-            self.store_model_weights(self.working_dir, f"{self.global_step}_")
             raise
         finally:
             self.store_model_weights(self.working_dir, f"{self.global_step}_")
@@ -525,8 +525,10 @@ class AccelerateTrainer:
                 model_state = {
                     k: v.detach().cpu() for k, v in model.state_dict().items()
                 }
-                torch.save(model_state, default_weights_path)
-                
+                tmp_path = default_weights_path + ".tmp"
+                torch.save(model_state, tmp_path)
+                os.replace(tmp_path, default_weights_path)
+
                 # Save EMA weights if available
                 if self.use_ema and self.ema is not None:
                     ema_weights_path = os.path.join(
@@ -536,7 +538,9 @@ class AccelerateTrainer:
                     ema_state = {
                         k: v.detach().cpu() for k, v in ema_model.state_dict().items()
                     }
-                    torch.save(ema_state, ema_weights_path)
+                    tmp_path = ema_weights_path + ".tmp"
+                    torch.save(ema_state, tmp_path)
+                    os.replace(tmp_path, ema_weights_path)
             
             # Synchronize again
             self.accelerator.wait_for_everyone()
