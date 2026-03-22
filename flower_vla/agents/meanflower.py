@@ -356,13 +356,13 @@ class MeanFlowerVLA(nn.Module):
                         device=self.device
                     )
 
-        # # Set up shared AdaLN if not using action-specific AdaLN
-        # if not self.action_type_adaln:
-        #     self.adaln = SharedAdaLNController(
-        #         dit_dim,
-        #         global_conddim=dit_dim,
-        #         use_cross_attn=use_cross_attn
-        #     )
+        # Set up shared AdaLN if not using action-specific AdaLN
+        if not self.action_type_adaln:
+            self.adaln = SharedAdaLNController(
+                dit_dim,
+                global_conddim=dit_dim,
+                use_cross_attn=use_cross_attn
+            )
 
     def _verify_device_consistency(self) -> None:
         """Verifies that all parameters and buffers are on the expected device."""
