@@ -527,10 +527,11 @@ class MeanFlowerVLA(nn.Module):
         # t and h are NOT detached — the full du/dt includes ∂u/∂t (through
         # t_embedder/adaLN) and ∂u/∂h (through MeanFlowDecoder's h_embedder).
         def u_func(z_input, t_input, r_input):
-            h_input = t_input - r_input
-            t_flat = t_input.view(-1)
-            h_flat = h_input.view(-1)
-            return self.dit_forward_meanflow(z_input, t_flat, h_flat, cond)
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                h_input = t_input - r_input
+                t_flat = t_input.view(-1)
+                h_flat = h_input.view(-1)
+                return self.dit_forward_meanflow(z_input, t_flat, h_flat, cond)
 
         # Tangent vectors: dz/dt = v, dt/dt = 1, dr/dt = 0
         dtdt = torch.ones_like(texp)

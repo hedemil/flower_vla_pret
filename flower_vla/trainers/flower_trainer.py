@@ -126,6 +126,9 @@ class AccelerateTrainer:
         ).to(self.accelerator.device)
         self.setup_ema()
 
+        # Cast model to bfloat16 for memory efficiency; autocast handles dtype during forward
+        self.agent = self.agent.to(torch.bfloat16)
+
         self.global_step = 0
         self.working_dir = os.getcwd()
 
