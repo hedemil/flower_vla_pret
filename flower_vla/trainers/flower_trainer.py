@@ -126,9 +126,6 @@ class AccelerateTrainer:
         ).to(self.accelerator.device)
         self.setup_ema()
 
-        # move agent to bfloat16 
-        self.agent = self.agent.to(torch.bfloat16)
-
         self.global_step = 0
         self.working_dir = os.getcwd()
 
