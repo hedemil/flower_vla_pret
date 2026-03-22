@@ -482,11 +482,12 @@ class MeanFlowerVLA(nn.Module):
         default_dtype = next(self.parameters()).dtype
         B = z.shape[0]
         max_action_dim = self.action_dim
-        decoded = torch.zeros(B, z.shape[1], max_action_dim, device=self.device, dtype=default_dtype)
+        decoded = torch.zeros(B, z.shape[1], max_action_dim, device=z.device, dtype=default_dtype)
         for action_name, action_idx in self.action_space_index.action_spaces.items():
             mask = (action_type == action_idx)
             if mask.any():
-                decoded = self.action_decoders[action_name](z, h)
+                adim = self.action_space_index.get_action_dim(action_idx)
+                decoded[mask, :, :adim] = self.action_decoders[action_name](z[mask], h[mask])
         return decoded
 
     # === Loss Functions ===
