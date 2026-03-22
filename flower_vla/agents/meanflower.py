@@ -754,7 +754,6 @@ class MeanFlowerVLA(nn.Module):
         Encodes observations, computes the appropriate flow loss, and returns the loss tensor.
         """
         self.train()
-        self._train_step += 1
         obs_features = self.encode_observations(batch)
 
         action_loss, losses_dict = self.meanflow_loss(
