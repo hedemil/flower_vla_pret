@@ -506,10 +506,6 @@ class MeanFlowerVLA(nn.Module):
         # Sample t and r with constraint t >= r
         t, r = self.sample_tr(b)
 
-        if self.global_rank == 0 and self.trainer.fit_loop.total_batch_idx % 1000 == 0:
-            logger.info(f"Step {self.global_step} | t: mean={t.mean().item():.4f}, std={t.std().item():.4f}, min={t.min().item():.4f}, max={t.max().item():.4f}")
-            logger.info(f"Step {self.global_step} | r: mean={r.mean().item():.4f}, std={r.std().item():.4f}, min={r.min().item():.4f}, max={r.max().item():.4f}")
-
         # Interpolate: z_t = (1 - t) * x + t * e
         texp = t.view([b] + [1] * (actions.dim() - 1)).to(dtype=default_dtype)
         rexp = r.view([b] + [1] * (actions.dim() - 1)).to(dtype=default_dtype)
