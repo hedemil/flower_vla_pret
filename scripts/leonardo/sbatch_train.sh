@@ -16,12 +16,13 @@
 
 #SBATCH --job-name=flowervla
 #SBATCH --partition=boost_usr_prod
+#SBATCH --qos=boost_qos_lprod
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
-#SBATCH --time=24:00:00
+#SBATCH --time=4-00:00:00
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
 
