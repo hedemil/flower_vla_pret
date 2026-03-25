@@ -53,5 +53,5 @@ agent:
   norm_eps: 1e-2
   norm_p: 1.0
   # iMF (improved MeanFlow) configuration
-  use_imf: False
+  use_imf: True
   imf_v_weight: 1.0

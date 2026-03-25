@@ -352,14 +352,16 @@ class AccelerateTrainer:
                     gc.collect()
                     torch.cuda.empty_cache()
                 if step % 1000 == 0 and self.accelerator.is_main_process:
-                    losses_info = self.agent.module.agent.losses_dict
-                    loss = losses_info.get("loss", float("nan"))
-                    raw_mse = losses_info.get("raw_mse", float("nan"))
-                    v_loss = losses_info.get("v_loss", float("nan"))
-                    dudt_norm = losses_info.get("dudt_norm", float("nan"))
-                    cos_u_utgt = losses_info.get("cos_u_utgt", float("nan"))
-                    cos_u_v = losses_info.get("cos_u_v", float("nan"))
-                    log.info(f"Step {self.global_step}: loss={loss:.6f} raw_mse={raw_mse:.6f}, v_loss={v_loss:.6f}, dudt_norm={dudt_norm:.6f}, cos_u_utgt={cos_u_utgt:.4f}, cos_u_v={cos_u_v:.4f}")
+                    li = self.agent.module.agent.losses_dict
+                    loss = li.get("loss", float("nan"))
+                    dudt_norm = li.get("dudt_norm", float("nan"))
+                    cos_u_v = li.get("cos_u_v", float("nan"))
+                    if "loss_V" in li:
+                        # iMF metrics
+                        log.info(f"Step {self.global_step}: loss={loss:.6f} loss_V={li['loss_V']:.6f} loss_vc={li['loss_vc']:.6f} raw_mse_V={li['raw_mse_V']:.6f} dudt={dudt_norm:.6f} cos_V_v={li['cos_V_v']:.4f} cos_u_v={cos_u_v:.4f}")
+                    else:
+                        # Original MeanFlow metrics
+                        log.info(f"Step {self.global_step}: loss={loss:.6f} raw_mse={li.get('raw_mse', float('nan')):.6f} v_loss={li.get('v_loss', float('nan')):.6f} dudt={dudt_norm:.6f} cos_u_utgt={li.get('cos_u_utgt', float('nan')):.4f} cos_u_v={cos_u_v:.4f}")
 
                 if step % 100 == 0 and wandb.run is not None and self.accelerator.is_main_process:
                     # Get metrics from agent

@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from timm.models.vision_transformer import RmsNorm
+from jvp_flash_attention.jvp_attention import JVPAttn
 
 ###############################################################################
 # Utility Functions
@@ -187,28 +188,17 @@ class FlowerAttention(nn.Module):
         k = self.k_norm(k)
         if self.use_rope:
             q, k = apply_rotary_pos_emb(q, k, self.cos, self.sin)
-        # Build attention mask if needed.
-        # Causal masking is handled below in the elif is_causal branch.
+        # Build attention mask for non-causal case
         if custom_attn_mask is not None:
             mask = custom_attn_mask.unsqueeze(1).expand(-1, self.n_heads, -1, -1)
         else:
             mask = None
-        # Manual attention for JVP compatibility
-        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        
-        # ADDED: Get the current dtype for the fill value
-        fill_value = torch.tensor(float('-inf'), dtype=q.dtype, device=q.device)
-
-        if mask is not None:
-            attn_weights = attn_weights.masked_fill(~mask, fill_value)
-        elif is_causal:
-            # ALSO FIXED: Use the existing device/dtype for the causal mask creation
-            causal_mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=q.device), diagonal=1)
-            attn_weights = attn_weights.masked_fill(causal_mask, fill_value)
-        
-        attn_weights = F.softmax(attn_weights, dim=-1)
-        attn_weights = self.attn_dropout(attn_weights)
-        attn_output = torch.matmul(attn_weights, v)
+        # JVP-compatible flash attention via Triton kernel
+        attn_output = JVPAttn.fwd_dual(
+            q, k, v,
+            attn_mask=mask,
+            causal=is_causal and mask is None,
+        )
         out = attn_output.transpose(1, 2).reshape(B, T, C)
         out = self.resid_dropout(self.proj(out))
         return out
@@ -290,20 +280,15 @@ class FlowerCrossAttention(nn.Module):
             q, _ = apply_rotary_pos_emb(q, q, self.q_cos, self.q_sin)
             k, _ = apply_rotary_pos_emb(k, k, self.k_cos, self.k_sin)
 
-        # Manual attention for JVP compatibility
-        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-
+        # Build attention mask
         if custom_attn_mask is not None:
-            # Reshape the mask to match the attention weights shape
             mask = custom_attn_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, S]
             mask = mask.expand(-1, self.n_heads, q.size(2), -1)  # [B, n_heads, T, S]
-            fill_value = torch.tensor(float('-inf'), dtype=q.dtype, device=q.device)
-            attn_weights = attn_weights.masked_fill(~mask, fill_value)
-        
-        attn_weights = F.softmax(attn_weights, dim=-1)
-        attn_weights = self.attn_dropout(attn_weights)
-        attn_output = torch.matmul(attn_weights, v)
-                                 
+        else:
+            mask = None
+        # JVP-compatible flash attention via Triton kernel
+        attn_output = JVPAttn.fwd_dual(q, k, v, attn_mask=mask)
+
         out = attn_output.transpose(1, 2).reshape(B, T, C)
         out = self.resid_dropout(self.proj(out))
         return out
@@ -631,4 +616,18 @@ class MeanFlowDecoder(nn.Module):
         z_h = torch.cat([z, h_embed], dim=-1)  # [B, T, dit_dim * 2]
 
         return self.decoder(z_h)  # [B, T, action_dim]
-    
+
+
+class VelocityDecoder(nn.Module):
+    """Instantaneous velocity decoder for iMF (no h-conditioning).
+    Predicts v_c used as JVP tangent and trained with auxiliary v-loss.
+    Simple linear projection like the original FLOWER action decoder."""
+    def __init__(self, dit_dim: int, action_dim: int, **kwargs):
+        super().__init__()
+        self.linear = nn.Linear(dit_dim, action_dim)
+        nn.init.zeros_(self.linear.weight)
+        nn.init.zeros_(self.linear.bias)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        """z: [B, T, dit_dim] -> [B, T, action_dim]"""
+        return self.linear(z)

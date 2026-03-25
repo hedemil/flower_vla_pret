@@ -1,5 +1,57 @@
 # MeanFlower VLA - Changelog
 
+## [2026-03-25] Implement improved MeanFlow (iMF) loss, add JVP flash attention
+
+**Problem**: Training stalled at 137k steps (best val_loss 0.1101 at 80k, no improvement for 5 evals/50k steps). The original MeanFlow loss uses a self-referential target `u_tgt = sg(v - h*du/dt)` which creates training instability requiring aggressive adaptive normalization. The improved MeanFlow (iMF) paper (Geng et al., arxiv:2512.02012) reformulates this into a non-self-referential compound velocity loss.
+
+**Key iMF changes vs original MeanFlow:**
+
+1. **JVP tangent**: Uses predicted velocity `v_c` (from a velocity head at h=0) instead of data velocity `v = e - x`
+2. **Loss target**: Compound velocity `V = u + h * sg(du/dt)` trained against `v = e - x` (non-self-referential)
+3. **Auxiliary v-loss**: Separate loss trains the velocity head: `MSE(v_pred, v)` where `v_pred` comes from the JVP primal via `has_aux=True`
+
+**JVP flash attention**: Replaced manual matmul attention in `meanflower_transformers.py` with `JVPAttn.fwd_dual()` from the `jvp_flash_attention` library (Triton kernel). This restores flash attention speed during JVP passes — the manual attention was a workaround for PyTorch's `F.scaled_dot_product_attention` not supporting second-order derivatives.
+
+**Code changes:**
+
+| Change | File | Rationale |
+|--------|------|-----------|
+| Add `VelocityDecoder` class | `meanflower_transformers.py` | Simple `nn.Linear(dit_dim, action_dim)` with zero-init. Predicts instantaneous velocity (no h-conditioning). |
+| Import `JVPAttn` from `jvp_flash_attention` | `meanflower_transformers.py` | JVP-compatible flash attention via Triton kernel |
+| Replace manual matmul attention with `JVPAttn.fwd_dual()` | `meanflower_transformers.py` | Both `FlowerAttention` and `FlowerCrossAttention` now use flash attention during JVP |
+| Add `use_imf`, `imf_v_weight` params | `meanflower.py` | Config toggle for iMF loss |
+| Add `velocity_decoders` ModuleDict | `meanflower.py` | Per-action-space velocity decoders, created when `use_imf=True` |
+| Add `decode_velocity()` method | `meanflower.py` | Decodes backbone features → velocity (no h input) |
+| Refactor `dit_forward_meanflow` into `_dit_backbone` + wrappers | `meanflower.py` | Shared backbone eliminates code duplication between `dit_forward_meanflow` and `dit_forward_velocity` |
+| Add `dit_forward_velocity()` method | `meanflower.py` | Backbone(h=0) + VelocityDecoder for tangent computation |
+| Add `imf_loss()` method | `meanflower.py` | Core iMF loss: v_c tangent pass (no_grad) → JVP with has_aux=True → compound velocity loss + aux v-loss |
+| Update `training_step` dispatch | `meanflower.py` | Routes to `imf_loss` when `use_imf=True`, else `meanflow_loss` |
+| Update console logging | `flower_trainer.py` | Handles both MeanFlow metrics (raw_mse, cos_u_utgt) and iMF metrics (loss_V, loss_vc, cos_V_v) |
+
+**Config changes** (`conf/trainer/agent/meanflower_vla.yaml`):
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `use_imf` | `True` | Enable iMF loss |
+| `imf_v_weight` | `1.0` | Weight for auxiliary v-loss (not currently used — equal weighting matches paper) |
+
+**New wandb metrics:**
+
+| Metric | What it measures |
+|--------|-----------------|
+| `loss_V` | Compound velocity loss: `MSE(V, v)` where `V = u + h * sg(du/dt)` |
+| `loss_vc` | Auxiliary velocity loss: `MSE(v_pred, v)` from JVP primal |
+| `raw_mse_V` | Raw compound velocity MSE (pre-adaptive weighting) |
+| `raw_mse_vc` | Raw velocity MSE (pre-adaptive weighting) |
+| `cos_V_v` | Cosine similarity between compound velocity V and data velocity v |
+| `cos_u_v` | Cosine similarity between u prediction and data velocity v |
+
+**Inference**: Unchanged. `sample_actions` still uses `u(z_1, t=1, h=1)` via `dit_forward_meanflow`. The velocity head is training-only.
+
+**Dependencies**: `pip install jvp_flash_attention` (Triton-based JVP-compatible flash attention)
+
+**Files changed**: `flower_vla/agents/networks/meanflower_transformers.py`, `flower_vla/agents/meanflower.py`, `flower_vla/trainers/flower_trainer.py`, `conf/trainer/agent/meanflower_vla.yaml`
+
 ## [2026-03-11] Add MeanFlow v_loss during eval, fix double-squeeze bug
 
 **Problem**: Val loss (action-space MSE from single-step sampling) increases monotonically despite training `v_loss` improving. The two metrics are **fundamentally different**: training measures `||u - u_tgt||²` in latent space with adaptive normalization; eval measures action-space MSE. We need a comparable eval metric to determine whether the model is actually overfitting or if the sampling procedure is the bottleneck.
