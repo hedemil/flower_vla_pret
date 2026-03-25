@@ -143,8 +143,9 @@ class MeanFlowerVLA(nn.Module):
         hidden_dim = self.vlm.config.text_config.d_model
         self.vlm_latent_dim = hidden_dim
         self.use_dopri5 = False
+        self.use_imf = use_imf
 
-        
+
         # Setup DiT components (Mean Flow version with MeanFlowDecoder)
         self._setup_dit_components_meanflow(
             dit_dim=dit_dim,
@@ -170,7 +171,6 @@ class MeanFlowerVLA(nn.Module):
         self.register_buffer("P_std", torch.tensor(P_std, dtype=torch.float32))
         self.norm_eps = norm_eps
         self.norm_p = norm_p
-        self.use_imf = use_imf
         self.imf_v_weight = imf_v_weight
 
         logger.info("VLM and DiT components set up.")

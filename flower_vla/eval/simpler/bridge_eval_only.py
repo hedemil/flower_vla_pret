@@ -215,7 +215,7 @@ def main_evaluation():
 
     project_root = os.environ.get("PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
     model_base_dir = project_root
-    ckpt = 'checkpoints/meanflow/checkpoint_20000' # 'checkpoints/checkpoint_360000'
+    ckpt = 'checkpoints/meanflower_checkpoint_80000/checkpoint_80000' # 'checkpoints/checkpoint_360000'
     # Initialize wandb
     run_name = f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     wandb.init(

@@ -193,12 +193,20 @@ class FlowerAttention(nn.Module):
             mask = custom_attn_mask.unsqueeze(1).expand(-1, self.n_heads, -1, -1)
         else:
             mask = None
-        # JVP-compatible flash attention via Triton kernel
-        attn_output = JVPAttn.fwd_dual(
-            q, k, v,
-            attn_mask=mask,
-            causal=is_causal and mask is None,
-        )
+        # Use JVP-compatible Triton kernel only during training;
+        # standard SDPA at inference (JVPAttn requires N_CTX >= 32).
+        if self.training:
+            attn_output = JVPAttn.fwd_dual(
+                q, k, v,
+                attn_mask=mask,
+                causal=is_causal and mask is None,
+            )
+        else:
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=mask,
+                is_causal=is_causal and mask is None,
+            )
         out = attn_output.transpose(1, 2).reshape(B, T, C)
         out = self.resid_dropout(self.proj(out))
         return out
@@ -286,8 +294,14 @@ class FlowerCrossAttention(nn.Module):
             mask = mask.expand(-1, self.n_heads, q.size(2), -1)  # [B, n_heads, T, S]
         else:
             mask = None
-        # JVP-compatible flash attention via Triton kernel
-        attn_output = JVPAttn.fwd_dual(q, k, v, attn_mask=mask)
+        # Use JVP-compatible Triton kernel only during training;
+        # standard SDPA at inference (JVPAttn requires N_CTX >= 32).
+        if self.training:
+            attn_output = JVPAttn.fwd_dual(q, k, v, attn_mask=mask)
+        else:
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=mask,
+            )
 
         out = attn_output.transpose(1, 2).reshape(B, T, C)
         out = self.resid_dropout(self.proj(out))
