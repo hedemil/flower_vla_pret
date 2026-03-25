@@ -306,18 +306,15 @@ class FlowerCrossAttention(nn.Module):
             mask = None
 
         if self.training:
-             # Manual attention for JVP compatibility
+            # Manual attention for JVP compatibility
             attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-            
-            # ADDED: Get the current dtype for the fill value
-            fill_value = torch.tensor(float('-inf'), dtype=q.dtype, device=q.device)
 
-            if mask is not None:
+            if custom_attn_mask is not None:
+                # Reshape the mask to match the attention weights shape
+                mask = custom_attn_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, S]
+                mask = mask.expand(-1, self.n_heads, q.size(2), -1)  # [B, n_heads, T, S]
+                fill_value = torch.tensor(float('-inf'), dtype=q.dtype, device=q.device)
                 attn_weights = attn_weights.masked_fill(~mask, fill_value)
-            elif is_causal:
-                # ALSO FIXED: Use the existing device/dtype for the causal mask creation
-                causal_mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=q.device), diagonal=1)
-                attn_weights = attn_weights.masked_fill(causal_mask, fill_value)
             
             attn_weights = F.softmax(attn_weights, dim=-1)
             attn_weights = self.attn_dropout(attn_weights)
