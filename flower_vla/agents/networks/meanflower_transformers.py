@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from timm.models.vision_transformer import RmsNorm
-from jvp_flash_attention.jvp_attention import JVPAttn, attention as jvp_attention
+from jvp_flash_attention.jvp_attention import JVPAttn
 
 ###############################################################################
 # Utility Functions
@@ -193,26 +193,24 @@ class FlowerAttention(nn.Module):
             mask = custom_attn_mask.unsqueeze(1).expand(-1, self.n_heads, -1, -1)
         else:
             mask = None
-        # Use JVP-compatible Triton kernel only during training;
-        # standard SDPA at inference (JVPAttn requires N_CTX >= 32).
+        
         if self.training:
-            # JVPAttn requires N_CTX >= 32 and even; pad if needed.
-            MIN_CTX = 32
-            T_orig = T
-            if T < MIN_CTX:
-                pad_len = MIN_CTX - T
-                q = F.pad(q, (0, 0, 0, pad_len))
-                k = F.pad(k, (0, 0, 0, pad_len))
-                v = F.pad(v, (0, 0, 0, pad_len))
-                if mask is not None:
-                    mask = F.pad(mask, (0, pad_len, 0, pad_len), value=float('-inf'))
-            attn_output = jvp_attention(
-                q, k, v,
-                attn_mask=mask,
-                causal=is_causal and mask is None,
-            )
-            if T_orig < MIN_CTX:
-                attn_output = attn_output[:, :, :T_orig, :]
+             # Manual attention for JVP compatibility
+            attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+            
+            # ADDED: Get the current dtype for the fill value
+            fill_value = torch.tensor(float('-inf'), dtype=q.dtype, device=q.device)
+
+            if mask is not None:
+                attn_weights = attn_weights.masked_fill(~mask, fill_value)
+            elif is_causal:
+                # ALSO FIXED: Use the existing device/dtype for the causal mask creation
+                causal_mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=q.device), diagonal=1)
+                attn_weights = attn_weights.masked_fill(causal_mask, fill_value)
+            
+            attn_weights = F.softmax(attn_weights, dim=-1)
+            attn_weights = self.attn_dropout(attn_weights)
+            attn_output = torch.matmul(attn_weights, v)
         else:
             attn_output = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v,
@@ -306,20 +304,24 @@ class FlowerCrossAttention(nn.Module):
             mask = mask.expand(-1, self.n_heads, q.size(2), -1)  # [B, n_heads, T, S]
         else:
             mask = None
-        # Use JVP-compatible Triton kernel only during training;
-        # standard SDPA at inference (JVPAttn requires N_CTX >= 32).
+
         if self.training:
-            # JVPAttn requires N_CTX >= 32 and even; pad query if needed.
-            MIN_CTX = 32
-            T_orig = T
-            if T < MIN_CTX:
-                pad_len = MIN_CTX - T
-                q = F.pad(q, (0, 0, 0, pad_len))
-                if mask is not None:
-                    mask = F.pad(mask, (0, 0, 0, pad_len), value=float('-inf'))
-            attn_output = jvp_attention(q, k, v, attn_mask=mask)
-            if T_orig < MIN_CTX:
-                attn_output = attn_output[:, :, :T_orig, :]
+             # Manual attention for JVP compatibility
+            attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+            
+            # ADDED: Get the current dtype for the fill value
+            fill_value = torch.tensor(float('-inf'), dtype=q.dtype, device=q.device)
+
+            if mask is not None:
+                attn_weights = attn_weights.masked_fill(~mask, fill_value)
+            elif is_causal:
+                # ALSO FIXED: Use the existing device/dtype for the causal mask creation
+                causal_mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=q.device), diagonal=1)
+                attn_weights = attn_weights.masked_fill(causal_mask, fill_value)
+            
+            attn_weights = F.softmax(attn_weights, dim=-1)
+            attn_weights = self.attn_dropout(attn_weights)
+            attn_output = torch.matmul(attn_weights, v)
         else:
             attn_output = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, attn_mask=mask,
