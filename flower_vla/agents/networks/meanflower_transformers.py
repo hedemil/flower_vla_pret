@@ -196,11 +196,23 @@ class FlowerAttention(nn.Module):
         # Use JVP-compatible Triton kernel only during training;
         # standard SDPA at inference (JVPAttn requires N_CTX >= 32).
         if self.training:
+            # JVPAttn requires N_CTX >= 32 and even; pad if needed.
+            MIN_CTX = 32
+            T_orig = T
+            if T < MIN_CTX:
+                pad_len = MIN_CTX - T
+                q = F.pad(q, (0, 0, 0, pad_len))
+                k = F.pad(k, (0, 0, 0, pad_len))
+                v = F.pad(v, (0, 0, 0, pad_len))
+                if mask is not None:
+                    mask = F.pad(mask, (0, pad_len, 0, pad_len), value=float('-inf'))
             attn_output = JVPAttn.fwd_dual(
                 q, k, v,
                 attn_mask=mask,
                 causal=is_causal and mask is None,
             )
+            if T_orig < MIN_CTX:
+                attn_output = attn_output[:, :, :T_orig, :]
         else:
             attn_output = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v,
@@ -297,7 +309,17 @@ class FlowerCrossAttention(nn.Module):
         # Use JVP-compatible Triton kernel only during training;
         # standard SDPA at inference (JVPAttn requires N_CTX >= 32).
         if self.training:
+            # JVPAttn requires N_CTX >= 32 and even; pad query if needed.
+            MIN_CTX = 32
+            T_orig = T
+            if T < MIN_CTX:
+                pad_len = MIN_CTX - T
+                q = F.pad(q, (0, 0, 0, pad_len))
+                if mask is not None:
+                    mask = F.pad(mask, (0, 0, 0, pad_len), value=float('-inf'))
             attn_output = JVPAttn.fwd_dual(q, k, v, attn_mask=mask)
+            if T_orig < MIN_CTX:
+                attn_output = attn_output[:, :, :T_orig, :]
         else:
             attn_output = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, attn_mask=mask,
