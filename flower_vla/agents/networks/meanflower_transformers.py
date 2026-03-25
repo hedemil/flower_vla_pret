@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from timm.models.vision_transformer import RmsNorm
-from jvp_flash_attention.jvp_attention import JVPAttn
+from jvp_flash_attention.jvp_attention import JVPAttn, attention as jvp_attention
 
 ###############################################################################
 # Utility Functions
@@ -206,7 +206,7 @@ class FlowerAttention(nn.Module):
                 v = F.pad(v, (0, 0, 0, pad_len))
                 if mask is not None:
                     mask = F.pad(mask, (0, pad_len, 0, pad_len), value=float('-inf'))
-            attn_output = JVPAttn.fwd_dual(
+            attn_output = jvp_attention(
                 q, k, v,
                 attn_mask=mask,
                 causal=is_causal and mask is None,
@@ -317,7 +317,7 @@ class FlowerCrossAttention(nn.Module):
                 q = F.pad(q, (0, 0, 0, pad_len))
                 if mask is not None:
                     mask = F.pad(mask, (0, 0, 0, pad_len), value=float('-inf'))
-            attn_output = JVPAttn.fwd_dual(q, k, v, attn_mask=mask)
+            attn_output = jvp_attention(q, k, v, attn_mask=mask)
             if T_orig < MIN_CTX:
                 attn_output = attn_output[:, :, :T_orig, :]
         else:
