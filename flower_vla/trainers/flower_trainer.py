@@ -425,7 +425,7 @@ class AccelerateTrainer:
             self.accelerator.backward(loss)
 
             if self.accelerator.sync_gradients:
-                self.accelerator.clip_grad_norm_(self.agent.module.agent.dit.parameters(), 1.0)
+                self.accelerator.clip_grad_norm_(self.agent.module.agent.dit_parameters(), 1.0)
                 self.accelerator.clip_grad_norm_(self.agent.module.agent.vlm.parameters(), 1.0)
 
             if self.single_optimizer:
@@ -668,10 +668,10 @@ class AccelerateTrainer:
         # Unwrap model from DDP wrapper
         if hasattr(self.agent, 'module'):
             vlm = self.agent.module.agent.vlm
-            dit = self.agent.module.agent.dit
+            dit = self.agent.module.agent.dit_blocks
         else:
             vlm = self.agent.agent.vlm
-            dit = self.agent.agent.dit
+            dit = self.agent.agent.dit_blocks
         
         # Calculate VLM norms by layer group
         vlm_layer_norms = {}
@@ -767,7 +767,7 @@ class AccelerateTrainer:
         weight_layers = []
         
         try:
-            for idx, layer in enumerate(agent.module.agent.dit):
+            for idx, layer in enumerate(agent.module.agent.dit_blocks):
                 if idx > 1:
                     continue
 

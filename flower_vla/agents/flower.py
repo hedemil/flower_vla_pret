@@ -413,6 +413,15 @@ class FlowerVLA(nn.Module):
             'attention_mask': attention_mask,
         }
 
+    @property
+    def dit_blocks(self) -> nn.ModuleList:
+        """Returns all DiT blocks for gradient clipping / iteration."""
+        return self.dit
+
+    def dit_parameters(self):
+        """Yields all DiT block parameters for gradient clipping."""
+        yield from self.dit.parameters()
+
     def encode_actions(self, z: torch.Tensor, action_type: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Encodes actions for each sample based on its action type.

@@ -484,6 +484,26 @@ class MeanFlowerVLA(nn.Module):
             'attention_mask': attention_mask,
         }
 
+    @property
+    def dit_blocks(self) -> nn.ModuleList:
+        """Returns all DiT blocks as a single ModuleList for gradient clipping / iteration.
+        Works for both iMF (shared + u-head + v-head) and non-iMF (single dit) modes."""
+        if self.use_imf:
+            all_blocks = nn.ModuleList(
+                list(self.shared_blocks) + list(self.u_head_blocks) + list(self.v_head_blocks)
+            )
+            return all_blocks
+        return self.dit
+
+    def dit_parameters(self):
+        """Yields all DiT block parameters for gradient clipping."""
+        if self.use_imf:
+            yield from self.shared_blocks.parameters()
+            yield from self.u_head_blocks.parameters()
+            yield from self.v_head_blocks.parameters()
+        else:
+            yield from self.dit.parameters()
+
     def encode_actions(self, z: torch.Tensor, action_type: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Encodes actions for each sample based on its action type.
