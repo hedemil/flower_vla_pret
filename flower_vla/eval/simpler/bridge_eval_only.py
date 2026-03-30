@@ -205,17 +205,17 @@ def main_evaluation():
         "pred_action_horizon": 10,
         "multistep": 5,
         "ensemble_strategy": 'false',
-        "num_sampling_steps": 4,
+        "num_sampling_steps": 1, # 4 for FLOWER, 1 for MeanFLOWER
         "use_ema": False,
         "use_torch_compile": True,
         "use_dopri5": False,
         "cfg_lambda": 1.0,
     }
-    debug_mode = True  # Set to False for full evaluation
+    debug_mode = False  # Set to False for full evaluation
 
     project_root = os.environ.get("PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
     model_base_dir = project_root
-    ckpt = 'checkpoints/meanflower_checkpoint_80000/checkpoint_80000' # 'checkpoints/checkpoint_360000'
+    ckpt = 'checkpoints/meanflower_200000/checkpoint_200000' # 'checkpoints/checkpoint_360000'
     # Initialize wandb
     run_name = f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     wandb.init(

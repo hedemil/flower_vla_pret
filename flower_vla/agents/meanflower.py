@@ -93,6 +93,7 @@ class MeanFlowerVLA(nn.Module):
         # iMF Configuration
         use_imf: bool = False,
         imf_v_weight: float = 1.0,
+        imf_head_depth: int = 8,
     ):
         """
         Initializes the MeanFlowerVLA agent that combines a pretrained vision–language model
@@ -144,6 +145,7 @@ class MeanFlowerVLA(nn.Module):
         self.vlm_latent_dim = hidden_dim
         self.use_dopri5 = False
         self.use_imf = use_imf
+        self.imf_head_depth = imf_head_depth
 
 
         # Setup DiT components (Mean Flow version with MeanFlowDecoder)
@@ -307,19 +309,34 @@ class MeanFlowerVLA(nn.Module):
             )
 
         # Set up DiT blocks
-        self.dit = nn.ModuleList([
-            FlowBlock(
-                dim=dit_dim,
-                heads=n_heads,
-                attn_pdrop=attn_pdrop,
-                resid_pdrop=resid_pdrop,
-                mlp_pdrop=mlp_pdrop,
-                use_cross_attn=use_cross_attn,
-                use_rope=use_rope,
-                query_seq_len=query_seq_len,
-                rope_theta=rope_theta
-            ) for _ in range(n_layers)
-        ])
+        block_kwargs = dict(
+            dim=dit_dim,
+            heads=n_heads,
+            attn_pdrop=attn_pdrop,
+            resid_pdrop=resid_pdrop,
+            mlp_pdrop=mlp_pdrop,
+            use_cross_attn=use_cross_attn,
+            use_rope=use_rope,
+            query_seq_len=query_seq_len,
+            rope_theta=rope_theta,
+        )
+
+        if self.use_imf:
+            # Split into shared backbone + separate u/v heads (matching official iMF)
+            shared_depth = n_layers - self.imf_head_depth
+            self.shared_blocks = nn.ModuleList([
+                FlowBlock(**block_kwargs) for _ in range(shared_depth)
+            ])
+            self.u_head_blocks = nn.ModuleList([
+                FlowBlock(**block_kwargs) for _ in range(self.imf_head_depth)
+            ])
+            self.v_head_blocks = nn.ModuleList([
+                FlowBlock(**block_kwargs) for _ in range(self.imf_head_depth)
+            ])
+        else:
+            self.dit = nn.ModuleList([
+                FlowBlock(**block_kwargs) for _ in range(n_layers)
+            ])
 
         # Set up action-specific components
         for action_name, action_idx in self.action_space_index.action_spaces.items():
@@ -699,22 +716,22 @@ class MeanFlowerVLA(nn.Module):
         v = e - actions  # data velocity (target)
 
         # Step 1: Compute v_c (velocity prediction at h=0) for JVP tangent.
+        # h=0 gives instantaneous velocity (not mean flow).
         # No gradients needed — v_c is only used as tangent direction.
-        # The velocity decoder is trained via loss_vc on v_pred from the JVP primal.
+        h_zero = torch.zeros_like(t)
         with torch.no_grad():
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                v_c_tangent = self.dit_forward_velocity(z, t, cond)
+                _, v_c_tangent = self._forward_imf(z, t, h_zero, cond)
 
         # Step 2: JVP with has_aux=True — u_func returns (u, v_pred) where
-        # v_pred is auxiliary (not differentiated). Matches JAX's has_aux pattern.
+        # v_pred is auxiliary (not differentiated). Matches official iMF pattern.
+        # Single forward pass: shared blocks -> branch -> u-head + v-head.
         def u_func(z_input, t_input, r_input):
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 h_input = t_input - r_input
                 t_flat = t_input.view(-1)
                 h_flat = h_input.view(-1)
-                cx, at, vd = self._dit_backbone(z_input, t_flat, h_flat, cond)
-                u = self.decode_actions_meanflow(cx, h_flat, at, vd)
-                v_pred = self.decode_velocity(cx, at, vd)
+                u, v_pred = self._forward_imf(z_input, t_flat, h_flat, cond)
             return u, v_pred
 
         dtdt = torch.ones_like(texp)
@@ -970,8 +987,9 @@ class MeanFlowerVLA(nn.Module):
             }
 
     def _dit_backbone(self, z: torch.Tensor, t: torch.Tensor, h: torch.Tensor, cond_dict: dict):
-        """Shared DiT backbone: encode actions, build conditioning, run DiT blocks.
-        Returns (features, action_type, valid_dims)."""
+        """Shared DiT backbone: encode actions, build conditioning, run blocks.
+        When use_imf=True, runs only shared_blocks; otherwise runs all dit blocks.
+        Returns (features, action_type, valid_dims, cond_kwargs)."""
         default_dtype = next(self.parameters()).dtype
         B, t_seq, d = z.shape
 
@@ -1011,22 +1029,45 @@ class MeanFlowerVLA(nn.Module):
         else:
             global_adaln = self.action_specific_adaln(global_cond, action_type)
 
-        for layer in self.dit:
+        # Run shared blocks (iMF) or all blocks (non-iMF)
+        blocks = self.shared_blocks if self.use_imf else self.dit
+        for layer in blocks:
             cx = layer(cx, global_cond, context=context, is_causal=True, global_adaln=global_adaln)
 
-        return cx, action_type, valid_dims
+        cond_kwargs = dict(global_cond=global_cond, context=context, global_adaln=global_adaln)
+        return cx, action_type, valid_dims, cond_kwargs
+
+    def _forward_imf(self, z: torch.Tensor, t: torch.Tensor, h: torch.Tensor, cond_dict: dict):
+        """Single forward pass for iMF: shared blocks -> branch -> u-head + v-head.
+        Returns (u, v) from one pass, matching official iMF __call__."""
+        cx, action_type, valid_dims, cond_kwargs = self._dit_backbone(z, t, h, cond_dict)
+
+        # Branch from shared output
+        cx_u = cx
+        cx_v = cx
+
+        for block in self.u_head_blocks:
+            cx_u = block(cx_u, cond_kwargs['global_cond'], context=cond_kwargs['context'],
+                         is_causal=True, global_adaln=cond_kwargs['global_adaln'])
+
+        for block in self.v_head_blocks:
+            cx_v = block(cx_v, cond_kwargs['global_cond'], context=cond_kwargs['context'],
+                         is_causal=True, global_adaln=cond_kwargs['global_adaln'])
+
+        u = self.decode_actions_meanflow(cx_u, h, action_type, valid_dims)
+        v = self.decode_velocity(cx_v, action_type, valid_dims)
+
+        return u, v
 
     def dit_forward_meanflow(self, z: torch.Tensor, t: torch.Tensor, h: torch.Tensor, cond_dict: dict) -> torch.Tensor:
-        """Forward pass: backbone + h-conditioned MeanFlowDecoder."""
-        cx, action_type, valid_dims = self._dit_backbone(z, t, h, cond_dict)
+        """Forward pass for inference: backbone + u-head + MeanFlowDecoder.
+        Only uses shared + u-head blocks (no v-head needed at inference)."""
+        cx, action_type, valid_dims, cond_kwargs = self._dit_backbone(z, t, h, cond_dict)
+        if self.use_imf:
+            for block in self.u_head_blocks:
+                cx = block(cx, cond_kwargs['global_cond'], context=cond_kwargs['context'],
+                           is_causal=True, global_adaln=cond_kwargs['global_adaln'])
         return self.decode_actions_meanflow(cx, h, action_type, valid_dims)
-
-    def dit_forward_velocity(self, z: torch.Tensor, t: torch.Tensor, cond_dict: dict) -> torch.Tensor:
-        """Forward pass for iMF velocity prediction: backbone(h=0) + VelocityDecoder."""
-        default_dtype = next(self.parameters()).dtype
-        h_zero = torch.zeros(z.shape[0], device=z.device, dtype=default_dtype)
-        cx, action_type, valid_dims = self._dit_backbone(z, t, h_zero, cond_dict)
-        return self.decode_velocity(cx, action_type, valid_dims)
 
     def encode_proprio(self, proprio: torch.Tensor, action_type: torch.Tensor, output_shape) -> torch.Tensor:
         """
