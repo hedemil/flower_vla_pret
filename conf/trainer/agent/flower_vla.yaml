@@ -36,7 +36,7 @@ agent:
   dit_dim: 1024
   n_heads: 16
   n_layers: 18
-  attn_pdrop: 0.3
+  attn_pdrop: 0.1
   resid_pdrop: 0.1
   mlp_pdrop: 0.1
   use_cross_attn: True

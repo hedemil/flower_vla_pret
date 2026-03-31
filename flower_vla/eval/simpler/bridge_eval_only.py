@@ -202,12 +202,12 @@ def main_evaluation():
     """Main evaluation function."""
     # Setup
     eval_config = {
-        "pred_action_horizon": 10,
+        "pred_action_horizon": 20, # Trained with 20
         "multistep": 5,
         "ensemble_strategy": 'false',
-        "num_sampling_steps": 1, # 4 for FLOWER, 1 for MeanFLOWER
+        "num_sampling_steps": 4, # 4 for Flower, 1 for MeanFlower
         "use_ema": False,
-        "use_torch_compile": True,
+        "use_torch_compile": False,
         "use_dopri5": False,
         "cfg_lambda": 1.0,
     }

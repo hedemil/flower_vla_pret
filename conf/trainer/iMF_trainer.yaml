@@ -7,7 +7,7 @@ defaults:
 use_torch_compile: False
 single_optimizer: False
 learning_rate_dit: 1e-4
-learning_rate_vlm: 2e-5
+learning_rate_vlm: 1e-5
 use_lr_scheduler: True
 beta_dit_1: 0.9
 beta_dit_2: 0.95
@@ -15,19 +15,21 @@ beta_vlm_1: 0.9
 beta_vlm_2: 0.99
 weight_decay:
   transformer_weight_decay: 0.1
-  vlm_weight_decay: 1e-9
+  vlm_weight_decay: 0.001
 
-dit_lr_scheduler: 
-  _target_: flower_vla.utils.lr_schedulers.InverseSquareRootLRSchedule
-  num_warmup_steps: 1000
-  timescale: 400000
-
-vlm_lr_scheduler: 
+dit_lr_scheduler:
   _target_: flower_vla.utils.lr_schedulers.TriStageLRScheduler
-  init_lr_scale: 0.001
-  final_lr_scale: 0.5
-  phase_ratio: "(0.1, 0.89, 0.01)"
-  total_steps: 400000
+  init_lr_scale: 0.1
+  final_lr_scale: 0.1
+  phase_ratio: "(0.01, 0.39, 0.6)"
+  total_steps: 600000
+
+vlm_lr_scheduler:
+  _target_: flower_vla.utils.lr_schedulers.TriStageLRScheduler
+  init_lr_scale: 0.01
+  final_lr_scale: 0.1
+  phase_ratio: "(0.1, 0.3, 0.6)"
+  total_steps: 600000
 
 eval_every_n_steps: ${eval_every_n_steps}
 save_every_n_steps: ${save_every_n_steps} 
