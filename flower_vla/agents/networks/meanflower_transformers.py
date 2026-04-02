@@ -181,42 +181,64 @@ class FlowerAttention(nn.Module):
             Tensor of shape [B, seq_len, dim] after attention and projection.
         """
         B, T, C = x.size()
-        # Compute query, key, value and reshape for multi-head attention.
+        
+        # 1. Projections & Reshaping
         qkv = self.qkv(x).reshape(B, T, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         q = self.q_norm(q)
         k = self.k_norm(k)
+        
         if self.use_rope:
             q, k = apply_rotary_pos_emb(q, k, self.cos, self.sin)
-        # Build attention mask for non-causal case
-        if custom_attn_mask is not None:
-            mask = custom_attn_mask.unsqueeze(1).expand(-1, self.n_heads, -1, -1)
-        else:
-            mask = None
-        
-        if self.training:
-             # Manual attention for JVP compatibility
-            attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-            
-            # ADDED: Get the current dtype for the fill value
-            fill_value = torch.tensor(float('-inf'), dtype=q.dtype, device=q.device)
 
-            if mask is not None:
-                attn_weights = attn_weights.masked_fill(~mask, fill_value)
-            elif is_causal:
-                # ALSO FIXED: Use the existing device/dtype for the causal mask creation
-                causal_mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=q.device), diagonal=1)
-                attn_weights = attn_weights.masked_fill(causal_mask, fill_value)
+        # 2. Padding Logic (Target 32 for Triton kernel compatibility)
+        TILE_SIZE = 32
+        pad_len = TILE_SIZE - T if T < TILE_SIZE else 0
+
+        if self.training:
+            # Pad Q, K, V: [B, nh, 20, d] -> [B, nh, 32, d]
+            if pad_len > 0:
+                q = F.pad(q, (0, 0, 0, pad_len))
+                k = F.pad(k, (0, 0, 0, pad_len))
+                v = F.pad(v, (0, 0, 0, pad_len))
+
+            # 3. Comprehensive Mask Construction
+            # We need a boolean mask of shape [B, 1, T_padded, S_padded]
+            # True = Keep, False = Mask Out
+            T_p = q.size(2)
             
-            attn_weights = F.softmax(attn_weights, dim=-1)
-            attn_weights = self.attn_dropout(attn_weights)
-            attn_output = torch.matmul(attn_weights, v)
+            # Start with a mask that identifies non-padded tokens
+            # [B, 1, 1, 32]
+            padding_mask = torch.zeros((B, 1, 1, T_p), dtype=torch.bool, device=x.device)
+            padding_mask[..., :T] = True 
+
+            if is_causal:
+                # Create [32, 32] causal mask
+                causal_mask = torch.tril(torch.ones((T_p, T_p), dtype=torch.bool, device=x.device))
+                # Combine: Token i can see token j IF (j <= i) AND (j is not padding)
+                mask = causal_mask & padding_mask
+            elif custom_attn_mask is not None:
+                # Pad the user-provided mask
+                mask = F.pad(custom_attn_mask, (0, pad_len, 0, pad_len), value=False)
+                mask = mask.unsqueeze(1) # [B, 1, T_p, T_p]
+            else:
+                mask = padding_mask
+
+            # 4. Compute JVP Attention
+            # Recall: fwd_dual is the requirement for MeanFlow's JVP propagation
+            attn_output = JVPAttn.fwd_dual(q, k, v, attn_mask=mask)
+
+            # 5. Unpad
+            if pad_len > 0:
+                attn_output = attn_output[:, :, :T, :]
         else:
+            # Inference Path
             attn_output = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v,
-                attn_mask=mask,
-                is_causal=is_causal and mask is None,
+                attn_mask=custom_attn_mask,
+                is_causal=is_causal and custom_attn_mask is None,
             )
+
         out = attn_output.transpose(1, 2).reshape(B, T, C)
         out = self.resid_dropout(self.proj(out))
         return out
@@ -289,37 +311,58 @@ class FlowerCrossAttention(nn.Module):
         """
         B, T, C = x.size()
         _, S, _ = context.size()
+
+        # 1. Projections and Norms (as before)
         q = self.q_proj(x).reshape(B, T, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
         k = self.k_proj(context).reshape(B, S, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
         v = self.v_proj(context).reshape(B, S, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-        if self.use_rope:
-            q, _ = apply_rotary_pos_emb(q, q, self.q_cos, self.q_sin)
-            k, _ = apply_rotary_pos_emb(k, k, self.k_cos, self.k_sin)
 
-        # Build attention mask
-        if custom_attn_mask is not None:
-            mask = custom_attn_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, S]
-            mask = mask.expand(-1, self.n_heads, q.size(2), -1)  # [B, n_heads, T, S]
-        else:
-            mask = None
+        # 2. Padding Logic for sequence length 20 -> 32
+        # Flash attention kernels usually require multiples of 32
+        TILE_SIZE = 32
+        pad_T = TILE_SIZE - T if T < TILE_SIZE else 0
+        pad_S = TILE_SIZE - S if S < TILE_SIZE else 0
 
         if self.training:
-            # Manual attention for JVP compatibility
-            attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-
-            if custom_attn_mask is not None:
-                # Reshape the mask to match the attention weights shape
-                mask = custom_attn_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, S]
-                mask = mask.expand(-1, self.n_heads, q.size(2), -1)  # [B, n_heads, T, S]
-                fill_value = torch.tensor(float('-inf'), dtype=q.dtype, device=q.device)
-                attn_weights = attn_weights.masked_fill(~mask, fill_value)
+            # Pad Query (T): [B, nh, 20, d] -> [B, nh, 32, d]
+            if pad_T > 0:
+                q = F.pad(q, (0, 0, 0, pad_T)) 
             
-            attn_weights = F.softmax(attn_weights, dim=-1)
-            attn_weights = self.attn_dropout(attn_weights)
-            attn_output = torch.matmul(attn_weights, v)
+            # Pad Key/Value (S): only if context is shorter than 32
+            if pad_S > 0:
+                k = F.pad(k, (0, 0, 0, pad_S))
+                v = F.pad(v, (0, 0, 0, pad_S))
+
+            # 3. Create the Mask
+            # The kernel needs to know which of the 32 slots are 'real'
+            # Mask shape: [B, S_padded] -> Broadcasted to [B, 1, 1, S_padded]
+            if custom_attn_mask is not None:
+                mask = F.pad(custom_attn_mask, (0, pad_S), value=False)
+            else:
+                # Create a boolean mask: True for valid data, False for padding
+                mask = torch.ones((B, S + pad_S), dtype=torch.bool, device=q.device)
+                if pad_S > 0:
+                    mask[:, -pad_S:] = False
+            
+            # Flash attention expectations: [B, 1, 1, S_padded]
+            mask = mask.unsqueeze(1).unsqueeze(2)
+
+            # 4. Compute JVP Attention
+            # This calls the Triton kernel for the forward pass + JVP component
+            attn_output = JVPAttn.fwd_dual(q, k, v, attn_mask=mask)
+
+            # 5. Unpad: Slice back to the original action horizon (20)
+            # [B, nh, 32, d] -> [B, nh, 20, d]
+            if pad_T > 0:
+                attn_output = attn_output[:, :, :T, :]
+                
         else:
+            # Inference path (usually uses PyTorch's native SDPA which handles small seq lengths)
+            if custom_attn_mask is not None:
+                mask = custom_attn_mask.unsqueeze(1).unsqueeze(2)
+            else:
+                mask = None
+                
             attn_output = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, attn_mask=mask,
             )
