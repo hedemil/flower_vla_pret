@@ -312,68 +312,37 @@ class FlowerCrossAttention(nn.Module):
         """
         B, T, C = x.size()
         _, S, _ = context.size()
-
-        # 1. Projections
         q = self.q_proj(x).reshape(B, T, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
         k = self.k_proj(context).reshape(B, S, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
         v = self.v_proj(context).reshape(B, S, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-        
-        q, k = self.q_norm(q), self.k_norm(k)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+        if self.use_rope:
+            q, _ = apply_rotary_pos_emb(q, q, self.q_cos, self.q_sin)
+            k, _ = apply_rotary_pos_emb(k, k, self.k_cos, self.k_sin)
+
+        # Build attention mask
+        if custom_attn_mask is not None:
+            mask = custom_attn_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, S]
+            mask = mask.expand(-1, self.n_heads, q.size(2), -1)  # [B, n_heads, T, S]
+        else:
+            mask = None
 
         if self.training:
-            # JVPAttn requires square masks (N, N). For cross-attention we
-            # concatenate Q and KV along the sequence dim, build a square mask
-            # that only allows queries to attend to context positions, then
-            # extract the query rows from the output.
-            TILE_SIZE = 32
-
-            # Pad T and S to multiples of TILE_SIZE
-            pad_T = (TILE_SIZE - (T % TILE_SIZE)) % TILE_SIZE
-            pad_S = (TILE_SIZE - (S % TILE_SIZE)) % TILE_SIZE
-
-            if pad_T > 0:
-                q = F.pad(q, (0, 0, 0, pad_T))
-            if pad_S > 0:
-                k = F.pad(k, (0, 0, 0, pad_S))
-                v = F.pad(v, (0, 0, 0, pad_S))
-
-            T_p, S_p = q.size(2), k.size(2)
-            N = max(T_p, S_p)
-
-            # Pad Q and KV to the same length N
-            if T_p < N:
-                q = F.pad(q, (0, 0, 0, N - T_p))
-            if S_p < N:
-                k = F.pad(k, (0, 0, 0, N - S_p))
-                v = F.pad(v, (0, 0, 0, N - S_p))
-
-            # Build square boolean mask [B, 1, N, N]
-            # Row i (query position) can attend to column j (key position) if mask[i,j] = True
-            # For cross-attention: queries attend only to valid context positions
-            mask = torch.zeros((B, 1, N, N), dtype=torch.bool, device=q.device)
+            # Manual attention for JVP compatibility
+            attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
 
             if custom_attn_mask is not None:
-                # custom_attn_mask is [B, S] — per-sample mask over context tokens
-                padded_ctx_mask = F.pad(custom_attn_mask, (0, pad_S), value=False)  # [B, S_p]
-                padded_ctx_mask = F.pad(padded_ctx_mask, (0, N - S_p), value=False)  # [B, N]
-                # Real query rows can attend to masked context columns
-                mask[:, :, :T, :] = padded_ctx_mask.unsqueeze(1).unsqueeze(2)
-            else:
-                # Real query rows can attend to real context columns
-                mask[:, :, :T, :S] = True
-
-            mask = mask.expand(-1, self.n_heads, -1, -1)
-
-            attn_output = JVPAttn.fwd_dual(q, k, v, attn_mask=mask)
-
-            # Extract only the query rows and unpad
-            attn_output = attn_output[:, :, :T, :]
+                # Reshape the mask to match the attention weights shape
+                mask = custom_attn_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, S]
+                mask = mask.expand(-1, self.n_heads, q.size(2), -1)  # [B, n_heads, T, S]
+                fill_value = torch.tensor(float('-inf'), dtype=q.dtype, device=q.device)
+                attn_weights = attn_weights.masked_fill(~mask, fill_value)
+            
+            attn_weights = F.softmax(attn_weights, dim=-1)
+            attn_weights = self.attn_dropout(attn_weights)
+            attn_output = torch.matmul(attn_weights, v)
         else:
-            if custom_attn_mask is not None:
-                mask = custom_attn_mask.unsqueeze(1).unsqueeze(2)
-            else:
-                mask = None
-
             attn_output = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, attn_mask=mask,
             )
