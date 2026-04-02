@@ -326,45 +326,16 @@ class FlowerCrossAttention(nn.Module):
         # Context S is usually large (384), but we ensure it's a multiple of 32
         pad_S = (TILE_SIZE - (S % TILE_SIZE)) % TILE_SIZE 
 
-        if self.training:
-            if pad_T > 0: q = F.pad(q, (0, 0, 0, pad_T)) 
-            if pad_S > 0:
-                k = F.pad(k, (0, 0, 0, pad_S))
-                v = F.pad(v, (0, 0, 0, pad_S))
-
-            T_p, S_p = q.size(2), k.size(2)
-
-            # 3. Create the 4D Mask [B, H, T_p, S_p]
-            if custom_attn_mask is not None:
-                # Assume custom_attn_mask is [B, S]
-                mask = F.pad(custom_attn_mask, (0, pad_S), value=False)
-                # Make it 4D: [B, 1, 1, S_p]
-                mask = mask.unsqueeze(1).unsqueeze(2)
-            else:
-                # Mask out the padding in the context (S)
-                mask = torch.zeros((B, 1, 1, S_p), dtype=torch.bool, device=q.device)
-                mask[..., :S] = True
-            
-            # Now expand to full 4D shape: [B, n_heads, T_p, S_p]
-            # This tells every (even padded) query token which context tokens it can see
-            mask = mask.expand(-1, self.n_heads, T_p, -1)
-
-            # 4. Compute JVP Attention
-            attn_output = JVPAttn.fwd_dual(q, k, v, attn_mask=mask)
-
-            # 5. Unpad Output
-            if pad_T > 0:
-                attn_output = attn_output[:, :, :T, :]
+        
+        # Inference path (usually uses PyTorch's native SDPA which handles small seq lengths)
+        if custom_attn_mask is not None:
+            mask = custom_attn_mask.unsqueeze(1).unsqueeze(2)
         else:
-            # Inference path (usually uses PyTorch's native SDPA which handles small seq lengths)
-            if custom_attn_mask is not None:
-                mask = custom_attn_mask.unsqueeze(1).unsqueeze(2)
-            else:
-                mask = None
-                
-            attn_output = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, attn_mask=mask,
-            )
+            mask = None
+            
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=mask,
+        )
 
         out = attn_output.transpose(1, 2).reshape(B, T, C)
         out = self.resid_dropout(self.proj(out))
