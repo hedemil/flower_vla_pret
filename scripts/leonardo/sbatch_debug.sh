@@ -27,6 +27,7 @@
 #SBATCH --time=00:30:00
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
+#SBATCH --account=AIFAC_F02_024
 
 set -euo pipefail
 
