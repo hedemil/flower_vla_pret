@@ -330,11 +330,13 @@ class FlowerCrossAttention(nn.Module):
             mask = None
 
         if self.training:
-            # SDPA math backend is JVP-compatible (unlike flash/mem-efficient backends)
-            with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
-                attn_output = F.scaled_dot_product_attention(
-                    q, k, v, attn_mask=mask,
-                )
+            # Manual attention for JVP compatibility
+            attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+            if mask is not None:
+                attn_weights = attn_weights + mask
+            attn_weights = F.softmax(attn_weights, dim=-1)
+            attn_weights = self.attn_dropout(attn_weights)
+            attn_output = torch.matmul(attn_weights, v)
         else:
             attn_output = F.scaled_dot_product_attention(
                 q, k, v, attn_mask=mask,
