@@ -741,7 +741,7 @@ class MeanFlowerVLA(nn.Module):
         h_zero = torch.zeros_like(t)
         with torch.no_grad():
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                _, v_c_tangent = self._forward_imf(z, t, h_zero, cond)
+                v_c_tangent = self._forward_v_only(z, t, h_zero, cond)
 
         # Step 2: JVP with has_aux=True — u_func returns (u, v_pred) where
         # v_pred is auxiliary (not differentiated). Matches official iMF pattern.
@@ -1078,6 +1078,17 @@ class MeanFlowerVLA(nn.Module):
         v = self.decode_velocity(cx_v, action_type, valid_dims)
 
         return u, v
+
+    def _forward_v_only(self, z: torch.Tensor, t: torch.Tensor, h: torch.Tensor, cond_dict: dict):
+        """Forward pass for v-head only: shared blocks -> v-head.
+        Used in iMF pass 1 where only v_c_tangent is needed (u_head is skipped)."""
+        cx, action_type, valid_dims, cond_kwargs = self._dit_backbone(z, t, h, cond_dict)
+
+        for block in self.v_head_blocks:
+            cx = block(cx, cond_kwargs['global_cond'], context=cond_kwargs['context'],
+                       is_causal=True, global_adaln=cond_kwargs['global_adaln'])
+
+        return self.decode_velocity(cx, action_type, valid_dims)
 
     def dit_forward_meanflow(self, z: torch.Tensor, t: torch.Tensor, h: torch.Tensor, cond_dict: dict) -> torch.Tensor:
         """Forward pass for inference: backbone + u-head + MeanFlowDecoder.

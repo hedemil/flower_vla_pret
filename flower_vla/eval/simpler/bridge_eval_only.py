@@ -202,7 +202,7 @@ def main_evaluation():
     """Main evaluation function."""
     # Setup
     eval_config = {
-        "pred_action_horizon": 20, # Trained with 20
+        "pred_action_horizon": 10, # Trained with 20
         "multistep": 5,
         "ensemble_strategy": 'false',
         "num_sampling_steps": 4, # 4 for Flower, 1 for MeanFlower
@@ -215,7 +215,7 @@ def main_evaluation():
 
     project_root = os.environ.get("PROJECT_ROOT", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
     model_base_dir = project_root
-    ckpt = 'checkpoints/meanflower_200000/checkpoint_200000' # 'checkpoints/checkpoint_360000'
+    ckpt = 'checkpoints/flower_baseline/checkpoint_290000' # 'checkpoints/checkpoint_360000'
     # Initialize wandb
     run_name = f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     wandb.init(

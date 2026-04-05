@@ -14,8 +14,7 @@
 #   FAST: checkpoints, wandb runs
 #
 # Dry-run first (recommended):
-#   DRY_RUN=1 bash scripts/leonardo/migrate_allocation.sh \
-#       AIFAC_P01_047 AIFAC_F02_024
+#   DRY_RUN=1 bash scripts/leonardo/migrate_allocation.sh AIFAC_P01_047 AIFAC_F02_024
 # =============================================================================
 
 set -euo pipefail

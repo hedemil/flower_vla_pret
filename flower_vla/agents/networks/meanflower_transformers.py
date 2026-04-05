@@ -321,29 +321,22 @@ class FlowerCrossAttention(nn.Module):
             q, _ = apply_rotary_pos_emb(q, q, self.q_cos, self.q_sin)
             k, _ = apply_rotary_pos_emb(k, k, self.k_cos, self.k_sin)
 
-        # Build attention mask
+        # Build attention mask: convert bool (True=valid) to float (-inf=masked) for SDPA
         if custom_attn_mask is not None:
-            mask = custom_attn_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, S]
-            mask = mask.expand(-1, self.n_heads, q.size(2), -1)  # [B, n_heads, T, S]
+            bool_mask = custom_attn_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, S]
+            bool_mask = bool_mask.expand(-1, self.n_heads, q.size(2), -1)  # [B, n_heads, T, S]
+            mask = torch.where(bool_mask, 0.0, float('-inf')).to(dtype=q.dtype)
         else:
             mask = None
 
         if self.training:
-            # Manual attention for JVP compatibility
-            attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-
-            if custom_attn_mask is not None:
-                # Reshape the mask to match the attention weights shape
-                mask = custom_attn_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, S]
-                mask = mask.expand(-1, self.n_heads, q.size(2), -1)  # [B, n_heads, T, S]
-                fill_value = torch.tensor(float('-inf'), dtype=q.dtype, device=q.device)
-                attn_weights = attn_weights.masked_fill(~mask, fill_value)
-            
-            attn_weights = F.softmax(attn_weights, dim=-1)
-            attn_weights = self.attn_dropout(attn_weights)
-            attn_output = torch.matmul(attn_weights, v)
+            # SDPA math backend is JVP-compatible (unlike flash/mem-efficient backends)
+            with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
+                attn_output = F.scaled_dot_product_attention(
+                    q, k, v, attn_mask=mask,
+                )
         else:
-            attn_output = torch.nn.functional.scaled_dot_product_attention(
+            attn_output = F.scaled_dot_product_attention(
                 q, k, v, attn_mask=mask,
             )
 

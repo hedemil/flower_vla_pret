@@ -52,8 +52,8 @@ rsync -avP leonardo:/leonardo_scratch/fast/AIFAC_P01_047/project/output/checkpoi
 
 ```bash
 # Checkpoint
-rsync -avP leonardo:/leonardo_scratch/fast/AIFAC_P01_047/project/output/checkpoints/runs/2026-03-23/13-39-22/checkpoint_80000/ ./checkpoints/meanflower_checkpoint_80000/
+rsync -avP leonardo:/leonardo_scratch/fast/AIFAC_P01_047/project/output/checkpoints/runs/2026-04-01/04-23-29/checkpoint_290000/ ./checkpoints/flower_baseline/
 
 # Hydra
-rsync -avP leonardo:/leonardo_scratch/fast/AIFAC_P01_047/project/output/checkpoints/runs/2026-03-23/13-39-22/.hydra ./checkpoints/meanflower_checkpoint_80000/
+rsync -avP leonardo:/leonardo_scratch/fast/AIFAC_P01_047/project/output/checkpoints/runs/2026-04-01/04-23-29/.hydra ./checkpoints/flower_baseline/
 ```
