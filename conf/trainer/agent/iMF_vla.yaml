@@ -55,4 +55,4 @@ agent:
   # iMF (improved MeanFlow) configuration
   use_imf: True
   imf_v_weight: 1.0
-  imf_head_depth: 8
+  imf_head_depth: 12
