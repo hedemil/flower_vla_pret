@@ -140,5 +140,5 @@ python -m accelerate.commands.launch --num_processes 4 --mixed_precision=bf16 \
     wandb.name=${MODEL}_${SLURM_JOB_ID} \
     wandb.entity=null \
     wandb.mode=offline \
-    +continue_training=/leonardo_scratch/fast/AIFAC_P01_047/project/output/checkpoints/runs/2026-04-01/04-23-29/checkpoint_270000 \
+    +continue_training=/leonardo_scratch/fast/AIFAC_F02_024/project/output/checkpoints/runs/2026-04-01/04-23-29/checkpoint_270000 \
     +step=270000
