@@ -952,18 +952,7 @@ class MeanFlowerVLA(nn.Module):
         Encodes observations, computes the appropriate flow loss, and returns the loss tensor.
         """
         self.train()
-
-        # Timing instrumentation (temporary)
-        import time
-        if not hasattr(self, '_step_count'):
-            self._step_count = 0
-        self._step_count += 1
-
-        torch.cuda.synchronize()
-        t0 = time.monotonic()
         obs_features = self.encode_observations(batch)
-        torch.cuda.synchronize()
-        t1 = time.monotonic()
 
         if self.use_imf:
             action_loss, losses_dict = self.imf_loss(
@@ -972,14 +961,6 @@ class MeanFlowerVLA(nn.Module):
         else:
             action_loss, losses_dict = self.meanflow_loss(
                 obs_features, batch[self.target_modality], batch['task']['dataset_index']
-            )
-        torch.cuda.synchronize()
-        t2 = time.monotonic()
-
-        if self._step_count % 100 == 0:
-            import logging
-            logging.getLogger(__name__).info(
-                f"[PROFILE] step={self._step_count} vlm={t1-t0:.3f}s dit+jvp={t2-t1:.3f}s total={t2-t0:.3f}s"
             )
 
         # Store debugging losses if needed.
