@@ -35,15 +35,15 @@ ABLATION="${1:?Usage: sbatch sbatch_ablation.sh <ratio05|heads12|both>}"
 # --- Set overrides per ablation ---
 case "${ABLATION}" in
     ratio05)
-        OVERRIDES="++agent.agent.ratio=0.5"
+        OVERRIDES="trainer.agent.agent.ratio=0.5"
         RUN_NAME="imf_ablation_ratio05"
         ;;
     heads12)
-        OVERRIDES="++agent.agent.imf_head_depth=12"
+        OVERRIDES="trainer.agent.agent.imf_head_depth=12"
         RUN_NAME="imf_ablation_heads12"
         ;;
     both)
-        OVERRIDES="++agent.agent.ratio=0.5 ++agent.agent.imf_head_depth=12"
+        OVERRIDES="trainer.agent.agent.ratio=0.5 trainer.agent.agent.imf_head_depth=12"
         RUN_NAME="imf_ablation_ratio05_heads12"
         ;;
     *)
