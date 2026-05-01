@@ -7,7 +7,7 @@
 # Usage:
 #   export LEONARDO_FAST=/leonardo_scratch/fast/AIFAC_P01_047
 #   export LEONARDO_WORK=/leonardo_work/AIFAC_P01_047
-#   sbatch scripts/leonardo/sbatch_train.sh [meanflower | flower]
+#   sbatch scripts/leonardo/sbatch_train.sh [meanflower | flower | imf]
 #
 # Paths are split across two storage tiers:
 #   $FAST — code, checkpoints, wandb (I/O-intensive)
